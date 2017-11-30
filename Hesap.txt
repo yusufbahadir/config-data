@@ -1,0 +1,8 @@
+Ödemeler için banka hesap bilgilerimiz aþaðýdaki gibidir:
+Ödeme sonrasý dekont paylaþmalarýný iletirseniz memnun oluruz.
+
+Banka                                                    : DENÝZBANK 
+Þube                                                      : Demirciler Sitesi Þube / 3210  
+IBAN Numarasý (TL hesabý)                : TR 53-0013-4000-0600-3414-3000-22 
+IBAN Numarasý (EUR hesabý)             : TR 96-0013-4000-0600-3414-3000-24
+IBAN Numarasý (USD hesabý)             : TR 69-0013-4000-0600-3414-3000-25 
