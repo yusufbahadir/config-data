@@ -1,0 +1,3323 @@
+Public Class UygulamaAkis
+%REM
+********
+Deðiþkenler
+********
+%END REM
+      Private m_Doc As notesdocument
+      Private m_Hata As String
+      Private m_username As String
+      Private m_sicil As String
+      
+      Private class_session As NotesSession
+      Private class_db As NotesDatabase
+      Private class_genPar As NotesDocument
+      Private class_attachView As NotesView
+      Private class_briefView As NotesView
+      Private server As NotesName
+      Private yazmaItem As notesitem
+      
+      Public logtext As String
+      Private strKonu As String
+      Private strIcerik As String
+      Public strAction As String
+      Public strAciklama As String
+      Private KampTuru As String
+      Private doTeklifBackup As Boolean
+%REM
+********
+Property ler
+********
+%END REM
+      Property Get Hata As String
+            Hata= m_Hata
+      End Property
+      
+      Property Set Hata As String
+            m_Hata = Hata
+      End Property
+      
+%REM
+********
+constructor
+********
+%END REM
+      Sub new ( docInit As NotesDocument, islemYapan As String, islemYapanSicil As String ) 
+            On Error Goto ErrorHandler          
+            Set m_Doc = docInit
+            Set class_session = New NotesSession
+            Set class_db = class_session.currentdatabase
+            Set class_genPar = class_db.GetProfileDocument("frmParGen")
+            Set class_attachView = class_db.Getview("vwAttach") 'vwLkpEkDosya
+            Set class_briefView = class_db.Getview("vwEmbAksBrief")
+            Set server = class_session.CreateName(class_db.server) 
+            
+            If m_Doc.HasItem("kampanyaTuru") Then
+                  KampTuru=Ucase(m_Doc.kampanyaTuru(0))+"- "
+            Else ' Eðer dokümanda kampanya turu alaný yoksa, parent'ta bu alan deðerine bak
+                  Dim ndParent As NotesDocument
+                  If m_Doc.Isresponse Then
+                        Set ndParent = class_db.Getdocumentbyunid(m_Doc.Parentdocumentunid)
+                        If ndParent.HasItem("kampanyaTuru") Then
+                              KampTuru=UCase(ndParent.kampanyaTuru(0))+"- "
+                        End If
+                  End If
+            End If
+
+            If m_Doc.Form(0) = "frmKampGir" Then m_Doc.FormNo = m_Doc.talepNo(0)
+
+            m_Hata = "0"
+            m_username = islemYapan
+            m_sicil = islemYapanSicil
+            
+            Exit Sub    
+ErrorHandler:
+            Call appLog.logError("LS:LsUygulamaAkis" , "UygulamaAkis - new", Err, Erl, Error$, PRIORITY_TYPE_YUKSEK, COPYTOGENERALLOGDB_HAYIR, COPYTOBO_HAYIR )
+            Exit Sub 
+      End Sub
+      
+%REM
+      Function kanalDegisimKontrol
+      Description: Comments for Sub
+%END REM
+      Function kanalDegisimKontrol(cikanKanallar As Boolean) As Boolean
+            On Error GoTo ErrorHandler
+            Dim eval As Variant
+            
+            cikanKanallar = False
+            kanalDegisimKontrol = False
+            If m_Doc.OncekiKanallar_AD(0) <> "" Then
+                  eval = Evaluate({@Trim(@Replace(OncekiKanallar_AD; Kanallar_AD; ""))}, m_Doc)
+                  If eval(0) = "" Then
+                        eval = Evaluate({@Trim(@Replace(Kanallar_AD; OncekiKanallar_AD; ""))}, m_Doc)
+                        If eval(0) <> "" Then
+                              kanalDegisimKontrol = True
+                        End If
+                  Else
+                        cikanKanallar = True
+                        kanalDegisimKontrol = True
+                  End If
+            End If
+            
+Terminate:
+            Exit Function     
+ErrorHandler:
+            m_Doc.Action = "0"
+            m_Doc.Busy = "0"  
+            Call appLog.logError("LS:LsUygulamaAkis" , "UygulamaAkis - kanalDegisimKontrol", Err, Erl, Error$, PRIORITY_TYPE_YUKSEK, COPYTOGENERALLOGDB_HAYIR, COPYTOBO_HAYIR )
+            Exit Function 
+      End Function
+      
+      %REM
+            Sub RemoveAttachments
+            Description: Belirtilen doküman için oluþturulmuþ belirtilen tipteki tüm ek dosyalarý siler
+      %END REM
+      Sub RemoveAttachments(unid As String, docType As String)
+            Dim attachColl As NotesDocumentCollection
+            Dim docAttach As NotesDocument
+
+            Set attachColl = class_attachView.Getalldocumentsbykey(unid + "~" + docType, True)
+            Set docAttach=attachColl.Getfirstdocument()
+            Do Until docAttach Is Nothing
+                  ' Remove doc
+                  docAttach.Form = "Sil_"+docAttach.Form(0)
+                  Call docAttach.Removeitem("$ref")
+                  Call docAttach.Save(True,False)
+                                   
+                  Set docAttach = attachColl.GetNextDocument(docAttach)
+            Loop
+      End Sub
+      
+      %REM
+            Sub TeklifleriGüncelle
+            Description: Seçili Kanallar'dan çýkarýlma yapýldýysa, o kanalla ilgili alanlar tekliflerde silinecek.
+      %END REM
+      Sub TeklifleriGüncelle(collTeklif As NotesDocumentCollection)
+            On Error GoTo ErrorHandler
+            Dim docTeklif As NotesDocument
+            Dim eval As Variant
+            Dim blEmail As Boolean, blSMS As Boolean, blSube As Boolean, blCM As Boolean, blOther As Boolean
+            
+            eval = Evaluate({@IsMember("E-MAIL"; Kanallar_AD)}, m_Doc)
+            blEmail = eval(0)
+
+            eval = Evaluate({@IsMember("SMS"; Kanallar_AD)}, m_Doc)
+            blSMS = eval(0)
+
+            eval = Evaluate({@IsMember("ÞUBE INBOUND"; Kanallar_AD) | @IsMember("ÞUBE OUTBOUND"; Kanallar_AD)}, m_Doc)
+            blSube = eval(0)
+
+            eval = Evaluate({!@IsNotMember("OMAGIC":"BÝREYSEL ÇAÐRI MERKEZÝ":"BÝREBÝR UZMAN HATTI":"ATOS":"CMC":"WIN":"IVN":"KOBI UZMAN HATTI"; Kanallar_AD)}, m_Doc)
+            blCM = eval(0)
+
+            eval = Evaluate({@Trim(@Replace(Kanallar_AD; "E-MAIL":"SMS":"ÞUBE INBOUND":"ÞUBE OUTBOUND":"OMAGIC":"BÝREYSEL ÇAÐRI MERKEZÝ":"BÝREBÝR UZMAN HATTI":"ATOS":"CMC":"WIN":"IVN":"KOBI UZMAN HATTI"; "")) != ""}, m_Doc)
+            blOther = eval(0)
+
+            Set docTeklif = collTeklif.Getfirstdocument()
+            Do Until docTeklif Is Nothing
+                  If Not blEmail Then
+                        ' Remove email fields
+                        docTeklif.emailSubject = ""
+                        ' Delete attachment emailSablon
+                        Call RemoveAttachments(docTeklif.Universalid, "emailSablon")
+                        ' Delete attachment emailOnay
+                        Call RemoveAttachments(docTeklif.Universalid, "emailOnay")
+                  End If
+                  
+                  If Not blSMS Then
+                        ' Remove sms fields
+                        docTeklif.smsMetni = ""
+                        ' Delete attachment smsOnay
+                        Call RemoveAttachments(docTeklif.Universalid, "smsOnay")
+                  End If
+                  
+                  If Not blSube Then
+                        ' Remove sube fields
+                        docTeklif.subeRol = ""
+                        docTeklif.subeScript = ""
+                        ' Delete attachment subeOnay
+                        Call RemoveAttachments(docTeklif.Universalid, "subeOnay")
+                  End If
+                  
+                  If Not blCM Then
+                        ' Remove Cagri Merkezi fields
+                        docTeklif.cagriMerkezScript = ""
+                        ' Delete attachment cmOnay
+                        Call RemoveAttachments(docTeklif.Universalid, "cmOnay")
+                  End If
+                  
+                  If Not blOther Then
+                        ' Remove diðer fields
+                        docTeklif.digerScript = ""
+                        ' Delete attachment digerOnay
+                        Call RemoveAttachments(docTeklif.Universalid, "digerOnay")
+                  End If
+                  
+                  Call docTeklif.Save(True, False, False)
+                  
+                  Set docTeklif = collTeklif.Getnextdocument(docTeklif)
+            Loop
+exitsub:
+            Exit Sub    
+ErrorHandler:
+            m_Doc.Action = "0"
+            m_Doc.Busy = "0"  
+            Call appLog.logError("LS:LsUygulamaAkis" , "UygulamaAkis - TeklifleriGüncelle", Err, Erl, Error$, PRIORITY_TYPE_YUKSEK, COPYTOGENERALLOGDB_HAYIR, COPYTOBO_HAYIR )
+            Exit Sub 
+      End Sub
+      
+%REM
+********
+Sub sadeceKaydet()
+********
+%END REM    
+      Sub sadeceKaydet()
+            On Error Goto ErrorHandler
+            Dim cikanKanallar As Boolean
+            Dim collTeklif As NotesDocumentCollection
+            Dim url As String 
+            
+            If m_Doc.Form(0) = "frmKampAks" Then
+                  If (m_Doc.kampanyaTuru(0) = "2-Recurrent") And ( (m_Doc.talepTuru(0) = "Müþteri Programý") Or (m_Doc.talepTuru(0) = "Süreç") ) Then
+                        If kanalDegisimKontrol(cikanKanallar) Then
+                              Set collTeklif = class_db.Search({Form = "frmAksTeklif" & ParentUNID = "} + m_Doc.Universalid + {" & DK != DK_Iptal}, Nothing, 0)
+                              Call collTeklif.Stampall("Kanallar", m_Doc.Kanallar)
+                              Call collTeklif.Stampall("Kanallar_ID", m_Doc.Kanallar_ID)
+                              Call collTeklif.Stampall("Kanallar_AD", m_Doc.Kanallar_AD)
+                              
+                              If cikanKanallar Then
+                                   Call TeklifleriGüncelle(collTeklif)
+                              End If
+                        End If
+                        m_Doc.OncekiKanallar = m_Doc.Kanallar
+                        m_Doc.OncekiKanallar_ID = m_Doc.Kanallar_ID
+                        m_Doc.OncekiKanallar_AD = m_Doc.Kanallar_AD
+                  End If
+
+                  'Email Kanalý seçildi ise, aksiyon formunda brief formuna aktarýlan alanlarýn deðiþmediðini kontrol et
+                  Dim briefDoc As NotesDocument
+                  Dim evalResult As Variant
+                  evalResult = Evaluate({@IsMember("E-MAIL"; @Right(Kanallar; "-"):KANAL_AD)}, m_Doc)
+                  If evalResult(0) = 1 Then
+                        Set briefDoc = class_briefView.Getdocumentbykey(m_Doc.Universalid, True)
+                        If Not briefDoc Is Nothing Then
+                              If (briefDoc.DK(0) < briefDoc.DK_BriefSorda(0)) And (briefDoc.emailHTMLTip(0) <> m_Doc.emailHTMLTip(0)) Then
+                                   briefDoc.emailHTMLTip = m_Doc.emailHTMLTip
+                                   Call briefDoc.Save(True, False)
+                              End If
+                        End If
+                  End If
+            End If
+
+            logtext = Cstr(Now()) & " ~ Doküman kaydedildi. ~ " & m_username 
+            Call tarihceyeEkle(logtext, m_Doc)
+            
+            ' Yeni loglama mekanizmasý
+            If m_Doc.HasItem("IsSaved") Then
+                  strAction = "Doküman kaydedildi."
+                  Call TarihceOlustur(m_Doc, m_Doc.Form(0), m_Doc.Form(0), m_Doc.talepNo(0), m_Doc.FormNo(0), strAction, strAciklama)
+            Else
+                  m_Doc.IsSaved = True
+                  strAction = "Doküman oluþturuldu"
+                  Call TarihceOlustur(m_Doc, m_Doc.Form(0), m_Doc.Form(0), m_Doc.talepNo(0), m_Doc.FormNo(0), strAction, strAciklama)
+            End If
+            
+            Call m_Doc.ComputeWithForm(False, False)
+            Call setDelegation("W", findYetkili())
+            ' Call altDokGuncelle(m_Doc.dk(0), logtext)
+            
+            url = "http://"+server.Common+".akbank.com.tr/syb/crmTlpyon.nsf/0/"& m_Doc.UniversalID & "?OpenDocument"
+            Print | <SCRIPT>window.location = '| & url & |'</SCRIPT>|  
+            
+exitsub:
+            Exit Sub    
+ErrorHandler:
+            m_Doc.Action = "0"
+            m_Doc.Busy = "0"  
+            Call appLog.logError("LS:LsUygulamaAkis" , "UygulamaAkis - sadeceKaydet", Err, Erl, Error$, PRIORITY_TYPE_YUKSEK, COPYTOGENERALLOGDB_HAYIR, COPYTOBO_HAYIR )
+            Exit Sub 
+      End Sub
+      
+%REM
+********
+Sub sakla()
+********
+%END REM
+      Sub sakla()
+            On Error Goto ErrorHandler
+            Dim cikanKanallar As Boolean
+            Dim collTeklif As NotesDocumentCollection
+            
+            If m_Doc.Form(0) = "frmKampAks" Then
+                  If (m_Doc.kampanyaTuru(0) = "2-Recurrent") And ( (m_Doc.talepTuru(0) = "Müþteri Programý") Or (m_Doc.talepTuru(0) = "Süreç") ) Then
+                        If kanalDegisimKontrol(cikanKanallar) Then
+                              Set collTeklif = class_db.Search({Form = "frmAksTeklif" & ParentUNID = "} + m_Doc.Universalid + {" & DK != DK_Iptal}, Nothing, 0)
+                              Call collTeklif.Stampall("Kanallar", m_Doc.Kanallar)
+                              Call collTeklif.Stampall("Kanallar_ID", m_Doc.Kanallar_ID)
+                              Call collTeklif.Stampall("Kanallar_AD", m_Doc.Kanallar_AD)
+                              
+                              If cikanKanallar Then
+                                   Call TeklifleriGüncelle(collTeklif)
+                              End If
+                        End If
+                        m_Doc.OncekiKanallar = m_Doc.Kanallar
+                        m_Doc.OncekiKanallar_ID = m_Doc.Kanallar_ID
+                        m_Doc.OncekiKanallar_AD = m_Doc.Kanallar_AD
+                  End If
+                  
+                  'Email Kanalý seçildi ise, aksiyon formunda brief formuna aktarýlan alanlarýn deðiþmediðini kontrol et
+                  Dim briefDoc As NotesDocument
+                  Dim evalResult As Variant
+                  evalResult = Evaluate({@IsMember("E-MAIL"; @Right(Kanallar; "-"):KANAL_AD)}, m_Doc)
+                  If evalResult(0) = 1 Then
+                        Set briefDoc = class_briefView.Getdocumentbykey(m_Doc.Universalid, True)
+                        If Not briefDoc Is Nothing Then
+                              If (briefDoc.DK(0) < briefDoc.DK_BriefSorda(0)) And (briefDoc.emailHTMLTip(0) <> m_Doc.emailHTMLTip(0)) Then
+                                   briefDoc.emailHTMLTip = m_Doc.emailHTMLTip
+                                   Call briefDoc.Save(True, False)
+                              End If
+                        End If
+                  End If
+            End If
+
+            logtext = Cstr(Now()) & " ~ Doküman kaydedildi. ~ " & m_username 
+            Call tarihceyeEkle(logtext, m_Doc)
+            
+            ' Yeni loglama mekanizmasý
+            If m_Doc.HasItem("IsSaved") Then
+                  strAction = "Doküman kaydedildi"
+                  Call TarihceOlustur(m_Doc, m_Doc.Form(0), m_Doc.Form(0), m_Doc.talepNo(0), m_Doc.FormNo(0), strAction, strAciklama)
+            Else
+                  m_Doc.IsSaved = True
+                  strAction = "Doküman oluþturuldu"
+                  Call TarihceOlustur(m_Doc, m_Doc.Form(0), m_Doc.Form(0), m_Doc.talepNo(0), m_Doc.FormNo(0), strAction, strAciklama)
+            End If
+            
+            Call m_Doc.ComputeWithForm(False, False)
+            Call setDelegation("W", findYetkili())
+            
+exitsub:
+            Exit Sub    
+ErrorHandler:
+            m_Doc.Action = "0"
+            m_Doc.Busy = "0"  
+            Call appLog.logError("LS:LsUygulamaAkis" , "UygulamaAkis - sakla", Err, Erl, Error$, PRIORITY_TYPE_YUKSEK, COPYTOGENERALLOGDB_HAYIR, COPYTOBO_HAYIR )
+            Exit Sub 
+      End Sub
+      
+%REM
+********
+Sub iptal()
+********
+%END REM    
+      Sub iptal()
+            On Error Goto ErrorHandler
+            
+            Redim docYazma(0) As String  
+            docYazma(0) = "Hickimse"
+            Call setYazmaYetkisi(docYazma())
+            
+            logtext = Cstr(Now()) & " ~ Doküman Ýptal Edildi ~ " & m_username
+            Call tarihceyeEkle(logtext, m_Doc)
+            
+            ' Yeni loglama mekanizmasý
+            strAction = "Ýptal edildi"
+            Call TarihceOlustur(m_Doc, m_Doc.Form(0), m_Doc.Form(0), m_Doc.talepNo(0), m_Doc.FormNo(0), strAction, strAciklama)
+            
+            m_Doc.dk = m_Doc.dk_Iptal(0)             
+            m_Doc.Form_old = m_Doc.Form(0)
+            
+            Call m_Doc.ComputeWithForm(False, False)
+            m_Doc.Form = m_Doc.Form(0)+"_sil"
+            
+exitsub:
+            Exit Sub    
+ErrorHandler:
+            m_Doc.Action = "0"
+            m_Doc.Busy = "0"  
+            Call appLog.logError("LS:LsUygulamaAkis" , "UygulamaAkis - iptal", Err, Erl, Error$, PRIORITY_TYPE_YUKSEK, COPYTOGENERALLOGDB_HAYIR, COPYTOBO_HAYIR )
+            Exit Sub 
+      End Sub     
+      
+%REM
+********
+Sub iptalAks()
+********
+%END REM    
+      Sub iptalAks()
+            On Error Goto ErrorHandler
+            
+            Dim item As NotesItem
+            
+            Redim docYazma(0) As String  
+            docYazma(0) = "Hickimse"
+            Call setYazmaYetkisi(docYazma())
+            
+            logtext = Cstr(Now()) & " ~ Doküman Ýptal Edildi ~ " & m_username
+            Call tarihceyeEkle(logtext, m_Doc)
+            
+            ' Yeni loglama mekanizmasý
+            strAction = "Ýptal edildi"
+            Call TarihceOlustur(m_Doc, m_Doc.Form(0), m_Doc.Form(0), m_Doc.talepNo(0), m_Doc.FormNo(0), strAction, strAciklama)
+            
+            m_Doc.dk = m_Doc.dk_Iptal(0)
+            Call m_Doc.RemoveItem("ustOnay")
+            
+            m_Doc.SendTo= m_Doc.girisyapanmail(0)
+            Set item = m_doc.Getfirstitem("SendTo")
+            If m_doc.HasItem("Email_KAMP_SORUMLU") Then
+                  If m_doc.Email_KAMP_SORUMLU(0) <> "" Then
+                        Call item.Appendtotextlist(m_doc.Email_KAMP_SORUMLU(0))
+                  End If
+            End If
+            If m_doc.HasItem("Email_KAMP_YONETICI") Then
+                  If m_doc.Email_KAMP_YONETICI(0) <> "" Then
+                        m_doc.Email_KAMP_YONETICI = setYetkiliMail("KAMP_YONETICI")
+                        Forall kmpyon In m_doc.Email_KAMP_YONETICI 
+                              If kmpyon <> "" Then
+                                   Call item.Appendtotextlist(kmpyon)
+                              End If
+                        End Forall
+                  End If
+            End If
+            If m_doc.HasItem("Email_CRM_SORUMLU") Then
+                  If m_doc.Email_CRM_SORUMLU(0) <> "" Then
+                        Call item.Appendtotextlist(m_doc.Email_CRM_SORUMLU(0))
+                  End If
+            End If
+            If m_doc.HasItem("Email_DATA_SORUMLU") Then
+                  If m_doc.Email_DATA_SORUMLU(0) <> "" Then
+                        Call item.Appendtotextlist(m_doc.Email_DATA_SORUMLU(0))
+                  End If
+            End If
+            If m_doc.HasItem("Email_BRIEF_SORUMLU") Then
+                  If m_doc.Email_BRIEF_SORUMLU(0) <> "" Then
+                        Call item.Appendtotextlist(m_doc.Email_BRIEF_SORUMLU(0))
+                  End If
+            End If
+            
+            m_Doc.sendCc = ""
+            
+            'mail \\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\            
+            ' Added by Shalini on 20-Jan for TLP-2011-6712 to add kampanyaTuru at the beginning of the subject incase of "frmKampAks" form
+            If m_Doc.Form(0)="frmKampAks" Then
+                  strKonu = KampTuru + m_Doc.talepNo(0)  + " iþlem no.lu "+m_Doc.kampanyaAd(0)+ " adlý kampanya ile ilgili " + m_Doc.aksiyonAd(0) + " isimli aksiyon iptal edilmiþtir"
+            Else
+                  strKonu = KampTuru + m_Doc.talepNo(0)  + " iþlem no.lu "+m_Doc.kampanyaAd(0)+ " adlý kampanya ile ilgili " + m_Doc.aksiyonAd(0) + " isimli aksiyon iptal edilmiþtir"
+            End If
+            'Till Here
+            strIcerik = m_Doc.talepNo(0) + " iþlem no.lu "+m_Doc.kampanyaAd(0)+ " adlý kampanyaya ait " + Cstr(m_Doc.baslangicTarihi(0))+" tarihinde iþleme alýnmasý gereken " + m_Doc.aksiyonAd(0) + " isimli aksiyon iptal edilmiþtir. <br />"
+            strIcerik = strIcerik+ "Ýlgili aksiyona eriþim için " 
+            strIcerik= strIcerik+ {<a href="http://}+server.Common+".akbank.com.tr/"+m_Doc.DBPath(0)+"/0/"+m_Doc.UniversalID+{?OpenDocument">} & "týklayýnýz." & {</a><br />} 
+            strIcerik = strIcerik+ "Bilgi ve deðerlendirmelerinize sunulur.<br />"       
+            
+            Call MailGonder(m_Doc.curUserMail(0), m_Doc.SendTo, m_Doc.sendCc, strKonu,  strIcerik)
+            'mail /////////////////////////////////////////////////////////////////
+            
+            ' Email kanalý seçildi ise, Brief'de iptal edilmeli
+            Dim evalResult As Variant
+            evalResult = Evaluate({@IsMember("E-MAIL"; @Right(Kanallar; "-"):KANAL_AD)}, m_Doc)
+            If evalResult(0) = 1 Then
+                  Dim brief_UygulamaAkis As UygulamaAkis
+                  Dim briefDoc As NotesDocument
+                  
+                  Set briefDoc = class_briefView.Getdocumentbykey(m_Doc.Universalid, True)
+                  If Not briefDoc Is Nothing Then
+                        Set brief_UygulamaAkis = New UygulamaAkis(briefDoc, m_username, m_sicil)
+                        Call brief_UygulamaAkis.briefIptal()
+                        
+                        Call briefDoc.Save(True, False)
+                  End If
+            End If
+            
+            Call m_Doc.ComputeWithForm(False, False)
+            
+            Call altDokGuncelle(m_Doc.dk(0), logtext)
+exitsub:
+            Exit Sub    
+ErrorHandler:
+            m_Doc.Action = "0"
+            m_Doc.Busy = "0"  
+            Call appLog.logError("LS:LsUygulamaAkis" , "UygulamaAkis - iptalAks", Err, Erl, Error$, PRIORITY_TYPE_YUKSEK, COPYTOGENERALLOGDB_HAYIR, COPYTOBO_HAYIR )
+            Exit Sub 
+      End Sub     
+      
+%REM
+********
+Sub setYazmaYetkisi(pStrArr() As String  )
+********
+%END REM
+      Sub setYazmaYetkisi(pStrArr() As String  )
+            m_Doc.RemoveItem ("Yazma")
+            Set yazmaItem = New NotesItem(m_Doc, "Yazma",  pStrArr, AUTHORS) 
+      End Sub
+      
+%REM
+********
+Function setYetkiliMail(rol As String) As Variant 
+********
+%END REM
+      Function setYetkiliMail(rol As String) As Variant 
+            On Error Goto Hata      
+            
+            Dim intSayRol As Integer, strArrEmail() As String
+            Dim docRol As NotesDocument ,viewRol As NotesView,collRol As NotesDocumentCollection
+            
+            Set viewRol=class_db.GetView("vwlkpYetkiRolTanim")   'vwlkpYetkiRolTanim
+            Call viewRol.Refresh
+            Set collRol=viewRol.GetAllDocumentsByKey(rol,True)
+            If collRol.count = 0 Then
+                  m_Hata = "lkpYetkiRolTanim viewunda " + rol + " bulunamadý " 
+                  Error 10001, m_Hata
+            End If
+            
+            Set docRol=collRol.GetFirstDocument
+            Redim strArrEmail ( 1 To collRol.count)
+            For intSayRol = 1 To collRol.count
+                  strArrEmail (intSayRol) = docRol.Email(0)            
+                  Set docRol=collRol.GetNextDocument(docRol)
+            Next
+            
+            setYetkiliMail = strArrEmail
+            
+            Exit Function     
+Hata :
+            Call appLog.logError("LS:LsUygulamaAkis" , "UygulamaAkis - setYetkiliMail", Err, Erl, Error$, PRIORITY_TYPE_YUKSEK, COPYTOGENERALLOGDB_HAYIR, COPYTOBO_HAYIR )
+            Exit Function
+      End Function
+      
+%REM
+********
+Sub tarihceyeEkle(logtext, m_Doc)
+********
+%END REM    
+      Sub tarihceyeEkle(logtext As String, m_Doc As NotesDocument)
+            On Error Goto ErrorHandler
+            Dim historyitem As notesitem 
+      'History alaný'na ekleniyor
+            Set historyitem = m_Doc.GetFirstItem("History")
+            Call historyitem.AppendToTextList(logText)
+            
+            Exit Sub    
+ErrorHandler:
+            m_Doc.Action = "0"
+            m_Doc.Busy = "0"  
+            Call appLog.logError("LS:LsUygulamaAkis" , "UygulamaAkis - tarihceyeEkle", Err, Erl, Error$, PRIORITY_TYPE_YUKSEK, COPYTOGENERALLOGDB_HAYIR, COPYTOBO_HAYIR )
+            Exit Sub 
+      End Sub
+      
+%REM
+********
+Sub MailGonder(strKonu As String, strBody As String, varTo As Variant, varCc As Variant)
+********
+%END REM
+      Sub MailGonder(strFrom, varTo As Variant, varCc As Variant, strKonu As String, strBody As String )
+            On Error Goto ErrorHandler
+            
+            Dim eposta As New EPosta()
+            eposta.KIMDEN = strFrom
+            eposta.KIME=varTo
+            eposta.cc = varCc
+            eposta.subject =strKonu
+            eposta.content =strBody
+            Call eposta.SendLdapMessage()
+            Set eposta = Nothing
+            
+            Exit Sub
+ErrorHandler:
+            m_Doc.Action = "0"
+            m_Doc.Busy = "0"
+            
+            Call appLog.logError("LS:LsUygulamaAkis" , "UygulamaAkis - MailGonder", Err, Erl, Error$, PRIORITY_TYPE_YUKSEK, COPYTOGENERALLOGDB_HAYIR, COPYTOBO_HAYIR )
+            Exit Sub 
+      End Sub
+      
+%REM
+********
+Sub createCMDScript()
+********
+%END REM
+      Sub createCMDScript()
+            On Error GoTo ErrorHandler
+            Dim arrScript() As String
+            Dim idx As Integer, i As Integer
+            Dim arrCodes(31) As String
+            Dim kanalSMSScript As String, kanalEMAILScript As String
+            Dim kanalSbInboundScript As String, kanalSbOutboundScript As String, kanalBirebirUHScript As String
+            Dim kanalGR1Script As String ' Þube Outbound-Birebir Uzman Hattý-Bireysel Çaðrý Merkezi-Omagic –Kurumsal Çaðrý merkezi
+            Dim segmentScript As String
+            Dim constSuffix As String
+            Dim kanalList As Variant
+            
+            ' Eleme Kriterlerinin karþýlýk kodlarýný ve diðer script bloklarýný oluþtur
+            arrCodes(0) = "Not In  Base-Segment [19] 'Akbank Personeli' by  MUSTERI.MUSTERI_NUMARASI" + Chr(13)
+            arrCodes(1) = "Not In  Base-Segment [1] 'Yakýn Ýzlemede Olan Müþteriler' by  MUSTERI.MUSTERI_NUMARASI" + Chr(13)
+            arrCodes(2) = "Not In  Base-Segment [158] 'Takipte olan Müþteriler' by  MUSTERI.MUSTERI_NUMARASI" + Chr(13)
+            arrCodes(3) = "Not In  Base-Segment [323] 'AKBANK EMEKLÝSÝ' by  MUSTERI.MUSTERI_NUMARASI" + Chr(13)
+            arrCodes(4) = "Not In  Base-Segment [428] 'Sabancý Holding Mensubu - Mensup Kod 5' by  MUSTERI.MUSTERI_NUMARASI" + Chr(13)
+            arrCodes(5) = "Not In  Base-Segment [429] 'Sabancý Holding Emeklisi - Mensup Kod 6' by  MUSTERI.MUSTERI_NUMARASI" + Chr(13)
+            arrCodes(6) = "Not In  Base-Segment [20] 'Sabancý Ailesi Mensuplarý' by  MUSTERI.MUSTERI_NUMARASI" + Chr(13)
+            arrCodes(7) = "Not In  Base-Segment [20] 'Sabancý Ailesi Mensuplarý' by  MUSTERI.MUSTERI_NUMARASI" + Chr(13)
+            arrCodes(8) = "Not In  Base-Segment [139] 'Yurtdisi Yerlesik' by  MUSTERI.MUSTERI_NUMARASI" + Chr(13)
+            arrCodes(9) = "In  Base-Segment [138] 'Uyruk TC' by  MUSTERI.MUSTERI_NUMARASI" + Chr(13)
+            arrCodes(10) = "Not In  Base-Segment [63] 'Vefat' by  MUSTERI.MUSTERI_NUMARASI" + Chr(13)
+            arrCodes(11) = "Not In  Base-Segment [4] 'Maaþ Müþterileri' by  MUSTERI.MUSTERI_NUMARASI" + Chr(13)
+            arrCodes(12) = "Not In  Base-Segment [80] 'VIP Müþteriler' by  MUSTERI.MUSTERI_NUMARASI" + Chr(13)
+            arrCodes(13) = "Not In  Base-Segment [99] 'TSK Personeli' by  MUSTERI.MUSTERI_NUMARASI" + Chr(13)
+            arrCodes(14) = "Not In  Base-Segment [149] 'Kamu Sektöründe Çalýþan Müþteriler' by  MUSTERI.MUSTERI_NUMARASI" + Chr(13)
+            arrCodes(15) = "Not In  Base-Segment [106] 'Axess Kart Sahipleri Açýk Logo' by  MUSTERI.MUSTERI_NUMARASI" + Chr(13)
+            arrCodes(16) = "Not In  Base-Segment [67] 'Wings Kart Sahipleri Açýk Logo' by  MUSTERI.MUSTERI_NUMARASI" + Chr(13)
+            arrCodes(17) = "Not In  Base-Segment [105] 'Fish Kart Sahipleri Açýk Logo' by  MUSTERI.MUSTERI_NUMARASI" + Chr(13)
+            arrCodes(18) = "Not In  Base-Segment [107] 'CSA Kart Sahipleri Açýk Logo' by  MUSTERI.MUSTERI_NUMARASI" + Chr(13)
+            arrCodes(19) = "Not In  Base-Segment [112] 'Wings Business Kart Sahipleri Açýk Logo' by  MUSTERI.MUSTERI_NUMARASI" + Chr(13)
+            arrCodes(20) = "Not In  Base-Segment [190] 'BizKart Sahipleri Açýk Logo' by  MUSTERI.MUSTERI_NUMARASI" + Chr(13)
+            arrCodes(21) = "Not In  Base-Segment [109] 'exi26 Kart Sahipleri Açýk Logo' by  MUSTERI.MUSTERI_NUMARASI" + Chr(13)
+            arrCodes(22) = "Not In  Base-Segment [116] 'Konut Kredisi Kullanmýþ Müþteriler ( Açýk )' by  MUSTERI.MUSTERI_NUMARASI" + Chr(13)
+            arrCodes(23) = "Not In  Base-Segment [117] 'Ihtiyac Kredisi Kullanmýþ Müþteriler ( Açýk )' by  MUSTERI.MUSTERI_NUMARASI" + Chr(13)
+            arrCodes(24) = "Not In  Base-Segment [118] 'Tasit Kredisi Kullanmýþ Müþteriler ( Açýk )' by  MUSTERI.MUSTERI_NUMARASI" + Chr(13)
+            arrCodes(25) = "Not In  Base-Segment [264] 'Toyota_Email_Sahipleri' by  MUSTERI.MUSTERI_NUMARASI" + Chr(13)
+            arrCodes(26) = "Not In  Base-Segment [20] 'Sabancý Ailesi Mensuplarý' by  MUSTERI.MUSTERI_NUMARASI" + Chr(13)
+            arrCodes(27) = "Not In  Base-Segment [511] 'Free Kart Sahipleri Açýk Logo' by  MUSTERI.MUSTERI_NUMARASI" + Chr(13)
+            arrCodes(28) = "Not In  Base-Segment [553] 'Olumsuz Talimatli Musteriler-Hareketsiz Hesaplar Hariç' by  MUSTERI.MUSTERI_NUMARASI" + Chr(13)
+            arrCodes(29) = "Not In  Base-Segment [525] 'Remote RM Müþterileri' by  MUSTERI.MUSTERI_NUMARASI" + Chr(13)
+            arrCodes(30) = "Not In Base-Segment [673] 'Axess Ticari Professional Açýk Logo' by MUSTERI.MUSTERI_NUMARASI" + Chr(13)
+            arrCodes(31) = "Not In Base-Segment [674] 'Wings Ticari Professional Açýk Logo' by MUSTERI.MUSTERI_NUMARASI" + Chr(13)
+            
+            kanalSMSScript = "In Base-Segment [5] 'CepTel Olanlar' by  MUSTERI.MUSTERI_NUMARASI" + Chr(13) +_
+            "And In  Base-Segment [581] 'SMS Gönderim Yapýlabilenler' by  MUSTERI.MUSTERI_NUMARASI" + Chr(13) +_
+            "And Not In  Base-Segment [565] 'SMS Ýstemeyenler' by  MUSTERI.MUSTERI_NUMARASI" + Chr(13)
+            
+            kanalEMAILScript = "In Base-Segment [6] 'E maili Olanlar' by  MUSTERI.MUSTERI_NUMARASI" + Chr(13) +_
+            "And In Base-Segment [582] 'EMAIL Gönderim Yapýlabilenler' by  MUSTERI.MUSTERI_NUMARASI" + Chr(13) +_
+            "And Not In  Base-Segment [566] 'Email Ýstemeyenler' by  MUSTERI.MUSTERI_NUMARASI" + Chr(13) +_
+            "And Not In  Base-Segment [108] 'Email Adresi Hatalý Olanlar' by  MUSTERI.MUSTERI_NUMARASI" + Chr(13)
+            
+            kanalSbInboundScript = "Not In Base-Segment [520] 'Ana MIY Segment Kodu 200-300' by  MUSTERI.MUSTERI_NUMARASI" + Chr(13) +_
+            "And Not In Base-Segment [518] 'TSK Maaþ Alan Erler' by  MUSTERI.MUSTERI_NUMARASI" + Chr(13) +_
+            "And Not In Base-Segment [563] 'ÇM Aramasý Ýstemeyenler' by  MUSTERI.MUSTERI_NUMARASI" + Chr(13) +_
+            "And Not In Base-Segment [564] 'IVN Aramasý Ýstemeyenler' by  MUSTERI.MUSTERI_NUMARASI" + Chr(13) +_
+            "And Not In Base-Segment [567] 'Þube Ýstemeyenler' by  MUSTERI.MUSTERI_NUMARASI" + Chr(13)
+            
+            kanalSbOutboundScript = "Not In Base-Segment [520] 'Ana MIY Segment Kodu 200-300' by  MUSTERI.MUSTERI_NUMARASI" + Chr(13) +_
+            "And Not In Base-Segment [518] 'TSK Maaþ Alan Erler' by  MUSTERI.MUSTERI_NUMARASI" + Chr(13) +_
+            "And Not In Base-Segment [563] 'ÇM Aramasý Ýstemeyenler' by  MUSTERI.MUSTERI_NUMARASI" + Chr(13) +_
+            "And Not In Base-Segment [564] 'IVN Aramasý Ýstemeyenler' by  MUSTERI.MUSTERI_NUMARASI" + Chr(13) +_
+            "And Not In Base-Segment [567] 'Þube Ýstemeyenler' by  MUSTERI.MUSTERI_NUMARASI" + Chr(13) +_
+            "And In Base-Segment [585] 'ÞUBE Gönderim Yapýlabilenler' by  MUSTERI.MUSTERI_NUMARASI" + Chr(13) +_
+            "And Not In Base-Segment [593] 'Birebir uzman portföyündeki MBBler (BBYH Sicili Dolu)' by  MUSTERI.MUSTERI_NUMARASI" + Chr(13) +_
+            "And (" + Chr(13) +_
+            "     In Base-Segment [5] 'CepTel Olanlar' by  MUSTERI.MUSTERI_NUMARASI" + Chr(13) +_
+            "     Or In Base-Segment [110] 'Ev Tel Olanlar' by  MUSTERI.MUSTERI_NUMARASI" + Chr(13) +_
+            "     Or In Base-Segment [111] 'Ýþ Tel Olanlar' by  MUSTERI.MUSTERI_NUMARASI" + Chr(13) +_
+            ")" + Chr(13)
+            
+            kanalBirebirUHScript = "Not In Base-Segment [520] 'Ana MIY Segment Kodu 200-300' by  MUSTERI.MUSTERI_NUMARASI" + Chr(13) +_
+            "And Not In Base-Segment [518] 'TSK Maaþ Alan Erler' by  MUSTERI.MUSTERI_NUMARASI" + Chr(13) +_
+            "And Not In Base-Segment [563] 'ÇM Aramasý Ýstemeyenler' by  MUSTERI.MUSTERI_NUMARASI" + Chr(13) +_
+            "And Not In Base-Segment [564] 'IVN Aramasý Ýstemeyenler' by  MUSTERI.MUSTERI_NUMARASI" + Chr(13) +_
+            "And Not In Base-Segment [567] 'Þube Ýstemeyenler' by  MUSTERI.MUSTERI_NUMARASI" + Chr(13) +_
+            "And In Base-Segment [583] 'ÇM Gönderim Yapýlabilenler' by  MUSTERI.MUSTERI_NUMARASI" + Chr(13) +_
+            "And (" + Chr(13) +_
+            "     In Base-Segment [5] 'CepTel Olanlar' by  MUSTERI.MUSTERI_NUMARASI" + Chr(13) +_
+            "     Or In Base-Segment [110] 'Ev Tel Olanlar' by  MUSTERI.MUSTERI_NUMARASI" + Chr(13) +_
+            "     Or In Base-Segment [111] 'Ýþ Tel Olanlar' by  MUSTERI.MUSTERI_NUMARASI" + Chr(13) +_
+            ")" + Chr(13)
+            
+            kanalGR1Script = "Not In  Base-Segment [520] 'Ana MIY Segment Kodu 200-300' by  MUSTERI.MUSTERI_NUMARASI" + Chr(13) +_
+            "And Not In  Base-Segment [518] 'TSK Maaþ Alan Erler' by  MUSTERI.MUSTERI_NUMARASI" + Chr(13) +_
+            "And Not In Base-Segment [563] 'ÇM Aramasý Ýstemeyenler' by  MUSTERI.MUSTERI_NUMARASI" + Chr(13) +_
+            "And Not In Base-Segment [564] 'IVN Aramasý Ýstemeyenler' by  MUSTERI.MUSTERI_NUMARASI" + Chr(13) +_
+            "And Not In Base-Segment [567] 'Þube Ýstemeyenler' by  MUSTERI.MUSTERI_NUMARASI" + Chr(13) +_
+            "And In Base-Segment [583] 'ÇM Gönderim Yapýlabilenler' by  MUSTERI.MUSTERI_NUMARASI" + Chr(13) +_
+            "And Not In Base-Segment [593] 'Birebir uzman portföyündeki MBBler (BBYH Sicili Dolu)' by  MUSTERI.MUSTERI_NUMARASI" + Chr(13) +_
+            "And (" + Chr(13) +_
+            "     In Base-Segment [5] 'CepTel Olanlar' by  MUSTERI.MUSTERI_NUMARASI" + Chr(13) +_
+            "     Or In Base-Segment [110] 'Ev Tel Olanlar' by  MUSTERI.MUSTERI_NUMARASI" + Chr(13) +_
+            "     Or In Base-Segment [111] 'Ýþ Tel Olanlar' by  MUSTERI.MUSTERI_NUMARASI" + Chr(13) +_
+            ")" + Chr(13)
+                        
+            segmentScript = "MUSTERI.MAKRO_SEGMENT_KODU  In  ( " + Join(m_Doc.Getitemvalue("segmentKodu"), " , ") + " )" + Chr(13)
+            
+            constSuffix = "In Base-Segment [514] 'Potansiyel Olmayan Müþteriler' by  MUSTERI.MUSTERI_NUMARASI" + Chr(13) +_
+            "And MUSTERI.MUSTERI_NUMARASI Not In (9407613,17302711,13174502,11225078,16813468,7327825)" + Chr(13) +_
+            "And Not In  Base-Segment [505] 'Potansiyel Maas Musterileri' by MUSTERI.MUSTERI_NUMARASI" + Chr(13)
+            
+            ' Nihai script'i oluþturmaya baþla
+            idx = 0
+            For i=1 To 32
+                  If m_Doc.Hasitem("ElemeKriter_" + CStr(i)) Then
+                        If m_Doc.getItemValue("ElemeKriter_" + CStr(i))(0) = "Evet" Then
+                              ReDim Preserve arrScript(idx) As String
+                              arrScript(idx) = arrCodes(i-1)
+                              idx = idx + 1
+                              ' Else
+                              ' ReDim Preserve arrScript(idx) As String
+                              ' arrScript(idx) = "ElemeKriter_" + CStr(i) + " : " + m_Doc.getItemValue("ElemeKriter_" + CStr(i))(0) + Chr(13)
+                              ' idx = idx + 1
+                        End If
+                  End If
+            Next
+            
+            If m_Doc.talepTuru(0) <> "Müþteri Programý" Then
+                  kanalList = ArrayAppend(m_Doc.Getitemvalue("KANAL_AD"), m_Doc.Getitemvalue("Kanallar_AD"))
+                  
+                  ' SMS veya TRIGGER SMS
+                  If Not ( IsNull(ArrayGetIndex(kanalList, "SMS")) And IsNull(ArrayGetIndex(kanalList, "TRIGGER SMS")) ) Then
+                        ' Bloklar arasý boþ satýr ekleniyor
+                        If idx <> 0 Then arrScript(idx-1) = arrScript(idx-1) + Chr(13)
+                        
+                        ReDim Preserve arrScript(idx) As String
+                        arrScript(idx) = kanalSMSScript
+                        idx = idx + 1
+                  End If
+
+                  ' E-MAIL
+                  If Not IsNull(ArrayGetIndex(kanalList, "E-MAIL")) Then
+                        ' Bloklar arasý boþ satýr ekleniyor
+                        If idx <> 0 Then arrScript(idx-1) = arrScript(idx-1) + Chr(13)
+                        
+                        ReDim Preserve arrScript(idx) As String
+                        arrScript(idx) = kanalEMAILScript
+                        idx = idx + 1
+                  End If
+
+                  ' ÞUBE INBOUND
+                  If Not IsNull(ArrayGetIndex(kanalList, "ÞUBE INBOUND")) Then
+                        ' Bloklar arasý boþ satýr ekleniyor
+                        If idx <> 0 Then arrScript(idx-1) = arrScript(idx-1) + Chr(13)
+                        
+                        ReDim Preserve arrScript(idx) As String
+                        arrScript(idx) = kanalSbInboundScript
+                        idx = idx + 1
+                  End If
+                  
+                  ' ÞUBE OUTBOUND
+                  If Not IsNull(ArrayGetIndex(kanalList, "ÞUBE OUTBOUND")) Then
+                        ' Bloklar arasý boþ satýr ekleniyor
+                        If idx <> 0 Then arrScript(idx-1) = arrScript(idx-1) + Chr(13)
+                        
+                        ReDim Preserve arrScript(idx) As String
+                        arrScript(idx) = kanalSbOutboundScript
+                        idx = idx + 1
+                  End If
+                  
+                  ' BÝREBÝR UZMAN HATTI
+                  If Not IsNull(ArrayGetIndex(kanalList, "BÝREBÝR UZMAN HATTI")) Or _
+                  Not IsNull(ArrayGetIndex(kanalList, "KOBI UZMAN HATTI")) Then
+                        ' Bloklar arasý boþ satýr ekleniyor
+                        If idx <> 0 Then arrScript(idx-1) = arrScript(idx-1) + Chr(13)
+                        
+                        ReDim Preserve arrScript(idx) As String
+                        arrScript(idx) = kanalBirebirUHScript
+                        idx = idx + 1
+                  End If
+                  
+                  ' BÝREYSEL ÇAÐRI MERKEZÝ, OMAGIC, KURUMSAL ÇAÐRI MERKEZÝ
+                  If Not IsNull(ArrayGetIndex(kanalList, "BÝREYSEL ÇAÐRI MERKEZÝ")) Or _
+                  Not IsNull(ArrayGetIndex(kanalList, "ATOS")) Or _
+                  Not IsNull(ArrayGetIndex(kanalList, "CMC")) Or _
+                  Not IsNull(ArrayGetIndex(kanalList, "WIN")) Or _
+                  Not IsNull(ArrayGetIndex(kanalList, "IVN")) Or _
+                  Not IsNull(ArrayGetIndex(kanalList, "OMAGIC")) Or _
+                  Not IsNull(ArrayGetIndex(kanalList, "KURUMSAL ÇAÐRI MERKEZÝ")) Then
+                        ' Bloklar arasý boþ satýr ekleniyor
+                        If idx <> 0 Then arrScript(idx-1) = arrScript(idx-1) + Chr(13)
+                        
+                        ReDim Preserve arrScript(idx) As String
+                        arrScript(idx) = kanalGR1Script
+                        idx = idx + 1
+                  End If
+            End If
+
+            ' Bloklar arasý boþ satýr ekleniyor
+            If idx <> 0 Then arrScript(idx-1) = arrScript(idx-1) + Chr(13)
+            
+            ReDim Preserve arrScript(idx) As String
+            arrScript(idx) = segmentScript
+            idx = idx + 1
+
+            ' Bloklar arasý boþ satýr ekleniyor
+            If idx <> 0 Then arrScript(idx-1) = arrScript(idx-1) + Chr(13)
+            
+            ReDim Preserve arrScript(idx) As String
+            arrScript(idx) = constSuffix
+            idx = idx + 1
+            
+            m_Doc.cmdSQLScript = Join(arrScript, "And ")
+
+            Exit Sub
+ErrorHandler:
+            Call appLog.logError("LS:LsUygulamaAkis" , "UygulamaAkis - createCMDScript", Err, Erl, Error$, PRIORITY_TYPE_YUKSEK, COPYTOGENERALLOGDB_HAYIR, COPYTOBO_HAYIR )
+            Error Err, Error$ 
+      End Sub
+
+      %REM
+********
+Sub yoneGonder()
+********
+      %END REM
+      Sub yoneGonder()
+            On Error Goto ErrorHandler
+            Dim yon
+            Dim dlgList
+            
+            'Call appLog.logWarningSimple("lsUygulamaAkis", "altDokGuncelle", m_doc.FormNo(0))
+            logtext = Cstr(Now()) & " ~ Yönetici onayýna gönderildi ~ " & m_username
+            Call tarihceyeEkle(logtext, m_Doc)
+            
+            ' Yeni loglama mekanizmasý
+            If Not m_Doc.HasItem("IsSaved") Then
+                  m_Doc.IsSaved = True
+                  strAction = "Doküman oluþturuldu"
+                  Call TarihceOlustur(m_Doc, m_Doc.Form(0), m_Doc.Form(0), m_Doc.talepNo(0), m_Doc.FormNo(0), strAction, strAciklama)
+            End If
+            
+            strAction = "Yönetici onayýna gönderildi"
+            Call TarihceOlustur(m_Doc, m_Doc.Form(0), m_Doc.Form(0), m_Doc.talepNo(0), m_Doc.FormNo(0), strAction, strAciklama)
+            
+            m_Doc.dk= m_Doc.DK_YonOnay(0)
+            
+            'Aksiyon Formuda Email Kanalý seçildi ise, aksiyon formunda brief formuna aktarýlan alanlarýn deðiþmediðini kontrol et
+            If m_Doc.Form(0)="frmKampAks" Then
+                  Dim briefDoc As NotesDocument
+                  Dim evalResult As Variant
+                  evalResult = Evaluate({@IsMember("E-MAIL"; @Right(Kanallar; "-"):KANAL_AD)}, m_Doc)
+                  If evalResult(0) = 1 Then
+                        Set briefDoc = class_briefView.Getdocumentbykey(m_Doc.Universalid, True)
+                        If Not briefDoc Is Nothing Then
+                              If (briefDoc.DK(0) < briefDoc.DK_BriefSorda(0)) And (briefDoc.emailHTMLTip(0) <> m_Doc.emailHTMLTip(0)) Then
+                                   briefDoc.emailHTMLTip = m_Doc.emailHTMLTip
+                                   Call briefDoc.Save(True, False)
+                              End If
+                        End If
+                  End If
+            End If
+
+            ' Birebir SY mi?
+            Dim sFormula As String
+            m_Doc.isGirisYapanBirebirSY = Evaluate(sFormula, m_Doc)
+            sFormula = {@If(@IsMember("[BIREBIR_SY]"; @UserRoles); "1"; "0")}
+            
+            'mail \\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\
+            ' START - TLP-2011-3765 Özgür Kanca
+            ' Dim yon As New Calisan(m_Doc.girisYapanYonSicil(0))
+            Dim YonSicil As String
+            If m_Doc.Hasitem("Yonetici") Then
+                  If m_Doc.Yonetici(0) <> "" Then
+                        YonSicil = m_Doc.Yonetici(0)
+                  Else
+                        YonSicil = m_Doc.girisYapanYonSicil(0)
+                  End If
+            Else
+                  YonSicil = m_Doc.girisYapanYonSicil(0)
+            End If
+            If InStr(YonSicil, "-") > 0 Then YonSicil = StrLeft(YonSicil, "-")
+            Set yon = New Calisan(YonSicil)
+            m_Doc.Yonetici_uid = yon.SICILNO
+            m_Doc.Yonetici_cn = yon.CN
+            ' END - TLP-2011-3765 Özgür Kanca
+            m_Doc.Email_YONETICI = yon.EMAIL
+            m_Doc.SendTo= m_Doc.Email_YONETICI(0)
+            
+            ' m_Doc.SendTo= yon.email
+            m_Doc.sendCc = ""
+            Set yon = Nothing 
+            
+            If m_Doc.Form(0) = "frmKampGir" Then
+                  strKonu = m_Doc.talepNo(0)  + " iþlem no.lu "+m_Doc.kampanyaAd(0)+ " adlý kampanya talep giriþi yapýlmýþtýr"
+                  strIcerik = m_Doc.talepNo(0)  + " iþlem no.lu "+m_Doc.kampanyaAd(0)+ " adlý kampanyanýn "+Cstr(m_Doc.GirisTarihi(0))+" tarihinde iþleme alýnmasý yönünde "+m_Doc.girisyapan(0)+" tarafýndan talep giriþi yapýlmýþtýr. <br />"
+                  strIcerik = strIcerik+ "Ýlgili kampanya talebine eriþim için "
+            Else
+                  ' Added by Shalini on 20-Jan for TLP-2011-6712 to add kampanyaTuru at the beginning of the subject incase of "frmKampAks" form
+                  If m_Doc.Form(0)="frmKampAks" Then
+                        strKonu = KampTuru + m_Doc.talepNo(0)  + " iþlem no.lu "+m_Doc.kampanyaAd(0)+ " adlý kampanya ile ilgili " + m_Doc.aksiyonAd(0) + " isimli aksiyon onayýnýza gönderilmiþtir"
+                  Else
+                        strKonu = KampTuru + m_Doc.talepNo(0)  + " iþlem no.lu "+m_Doc.kampanyaAd(0)+ " adlý kampanya ile ilgili " + m_Doc.aksiyonAd(0) + " isimli aksiyon onayýnýza gönderilmiþtir"
+                  End If
+                  'Till Here
+                  
+                  strIcerik = m_Doc.talepNo(0) + " iþlem no.lu "+m_Doc.kampanyaAd(0)+ " adlý kampanyaya ait " + Cstr(m_Doc.baslangicTarihi(0))+" tarihinde iþleme alýnmasý gereken " + m_Doc.aksiyonAd(0) + " isimli aksiyon "+m_Doc.curUserCN(0)+" tarafýndan onayýnýza gönderilmiþtir. <br />"
+                  strIcerik = strIcerik+ "Ýlgili aksiyona eriþim için "
+            End If
+            strIcerik= strIcerik+ {<a href="http://}+server.Common+".akbank.com.tr/"+m_Doc.DBPath(0)+"/0/"+m_Doc.UniversalID+{?OpenDocument">} & "týklayýnýz." & {</a><br />} 
+            'mail /////////////////////////////////////////////////////////////////
+            
+            Call m_Doc.computeWithForm(True,False)
+            Call setDelegation("W", findYetkili())
+            
+            If m_Doc.Form(0) = "frmKampGir" Then
+                  dlgList = getDelegations(m_Doc.GetItemValue("Yonetici_uid"))
+                  m_Doc.DelegeReaders = dlgList
+                  m_Doc.sendCc = getEmails(dlgList)
+            Else
+                  m_Doc.sendCc = getEmails(m_Doc.GetItemValue("DelegeAuthors"))
+            End If
+            Call MailGonder(m_Doc.curUserMail(0), m_Doc.SendTo, m_Doc.sendCc, strKonu,  strIcerik)
+            m_Doc.sendCc = ""
+            
+            Call altDokGuncelle(m_Doc.dk(0), logtext)
+exitsub:
+            Exit Sub    
+ErrorHandler:
+            m_Doc.Action = "0"
+            m_Doc.Busy = "0"  
+            Call appLog.logError("LS:LsUygulamaAkis" , "UygulamaAkis - yoneGonder", Err, Erl, Error$, PRIORITY_TYPE_YUKSEK, COPYTOGENERALLOGDB_HAYIR, COPYTOBO_HAYIR )
+            Exit Sub 
+      End Sub     
+      
+%REM
+********
+Sub ustOnayaGonder()
+********
+%END REM
+      Sub ustOnayaGonder()
+            On Error Goto ErrorHandler
+            Dim dlgList
+            
+            logtext = Cstr(Now()) & " ~ Üst yönetici onayýna gönderildi ~ " & m_username
+            Call tarihceyeEkle(logtext, m_Doc)
+            
+            ' Yeni loglama mekanizmasý
+            If Not m_Doc.HasItem("IsSaved") Then
+                  m_Doc.IsSaved = True
+                  strAction = "Doküman oluþturuldu"
+                  Call TarihceOlustur(m_Doc, m_Doc.Form(0), m_Doc.Form(0), m_Doc.talepNo(0), m_Doc.FormNo(0), strAction, strAciklama)
+            End If
+            
+            strAction = "Üst yönetici onayýna gönderildi"
+            Call TarihceOlustur(m_Doc, m_Doc.Form(0), m_Doc.Form(0), m_Doc.talepNo(0), m_Doc.FormNo(0), strAction, strAciklama)
+            
+            'm_Doc.dk= m_Doc.DK_YonOnay(0)
+            m_Doc.dk= m_Doc.DK_UstYonOnay(0)
+            m_Doc.ustOnay = "1"
+            
+            'Aksiyon Formuda Email Kanalý seçildi ise, aksiyon formunda brief formuna aktarýlan alanlarýn deðiþmediðini kontrol et
+            If m_Doc.Form(0)="frmKampAks" Then
+                  Dim briefDoc As NotesDocument
+                  Dim evalResult As Variant
+                  evalResult = Evaluate({@IsMember("E-MAIL"; @Right(Kanallar; "-"):KANAL_AD)}, m_Doc)
+                  If evalResult(0) = 1 Then
+                        Set briefDoc = class_briefView.Getdocumentbykey(m_Doc.Universalid, True)
+                        If Not briefDoc Is Nothing Then
+                              If (briefDoc.DK(0) < briefDoc.DK_BriefSorda(0)) And (briefDoc.emailHTMLTip(0) <> m_Doc.emailHTMLTip(0)) Then
+                                   briefDoc.emailHTMLTip = m_Doc.emailHTMLTip
+                                   Call briefDoc.Save(True, False)
+                              End If
+                        End If
+                  End If
+            End If
+
+            ' Birebir SY mi?
+            Dim sFormula As String
+            sFormula = {@If(@IsMember("[BIREBIR_SY]"; @UserRoles); "1"; "0")}
+            m_Doc.isGirisYapanBirebirSY = Evaluate(sFormula, m_Doc)
+            
+            'mail \\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\
+            Dim strYonSicil As String
+            strYonSicil = Strleft(m_Doc.Yonlendirilen(0), "-")
+            Dim yon As New Calisan(strYonSicil)
+            m_Doc.Yonlendirilen_uid = yon.SICILNO
+            m_Doc.Yonlendirilen_cn = yon.CN
+            m_Doc.SendTo= yon.email
+            m_Doc.sendCc = ""
+            Set yon = Nothing 
+            
+            If m_Doc.Form(0) = "frmKampGir" Then
+                  strKonu = m_Doc.talepNo(0)  + " iþlem no.lu "+m_Doc.kampanyaAd(0)+ " adlý kampanya talep giriþi yapýlmýþtýr"
+                  strIcerik = m_Doc.talepNo(0)  + " iþlem no.lu "+m_Doc.kampanyaAd(0)+ " adlý kampanyanýn "+Cstr(m_Doc.GirisTarihi(0))+" tarihinde iþleme alýnmasý yönünde "+m_Doc.girisyapan(0)+" tarafýndan talep giriþi yapýlmýþtýr. <br />"
+                  strIcerik = strIcerik+ "Ýlgili kampanya talebine eriþim için "
+            Else
+                  
+                  ' Added by Shalini on 20-Jan for TLP-2011-6712 to add kampanyaTuru at the beginning of the subject incase of "frmKampAks" form
+                  If m_Doc.Form(0)="frmKampAks" Then
+                        strKonu = KampTuru + m_Doc.talepNo(0)  + " iþlem no.lu "+m_Doc.kampanyaAd(0)+ " adlý kampanya ile ilgili " + m_Doc.aksiyonAd(0) + " isimli aksiyon onayýnýza gönderilmiþtir"
+                  Else
+                        strKonu = KampTuru + m_Doc.talepNo(0)  + " iþlem no.lu "+m_Doc.kampanyaAd(0)+ " adlý kampanya ile ilgili " + m_Doc.aksiyonAd(0) + " isimli aksiyon onayýnýza gönderilmiþtir"
+                  End If
+                  'Till Here
+                  
+                  strIcerik = m_Doc.talepNo(0) + " iþlem no.lu "+m_Doc.kampanyaAd(0)+ " adlý kampanyaya ait " + Cstr(m_Doc.baslangicTarihi(0))+" tarihinde iþleme alýnmasý gereken " + m_Doc.aksiyonAd(0) + " isimli aksiyon "+m_Doc.curUserCN(0)+" tarafýndan onayýnýza gönderilmiþtir. <br />"
+                  strIcerik = strIcerik+ "Ýlgili aksiyona eriþim için "
+            End If
+            strIcerik= strIcerik+ {<a href="http://}+server.Common+".akbank.com.tr/"+m_Doc.DBPath(0)+"/0/"+m_Doc.UniversalID+{?OpenDocument">} & "týklayýnýz." & {</a><br />} 
+            strIcerik = strIcerik+ "Bilgi ve deðerlendirmelerinize sunulur.<br />"       
+            'mail /////////////////////////////////////////////////////////////////
+            
+            Call m_Doc.computeWithForm(True,False)
+            Call setDelegation("W", findYetkili())
+            
+            If m_Doc.Form(0) = "frmKampGir" Then
+                  dlgList = getDelegations(m_Doc.GetItemValue("Yonlendirilen_uid"))
+                  m_Doc.DelegeReaders = dlgList
+                  m_Doc.sendCc = getEmails(dlgList)
+            Else
+                  m_Doc.sendCc = getEmails(m_Doc.GetItemValue("DelegeAuthors"))
+            End If
+            Call MailGonder(m_Doc.curUserMail(0), m_Doc.SendTo, m_Doc.sendCc, strKonu,  strIcerik)
+            m_Doc.sendCc = ""
+            
+            Call altDokGuncelle(m_Doc.DK_UstYonOnay(0), logtext)
+exitsub:
+            Exit Sub    
+ErrorHandler:
+            m_Doc.Action = "0"
+            m_Doc.Busy = "0"  
+            Call appLog.logError("LS:LsUygulamaAkis" , "UygulamaAkis - ustOnayaGonder", Err, Erl, Error$, PRIORITY_TYPE_YUKSEK, COPYTOGENERALLOGDB_HAYIR, COPYTOBO_HAYIR )
+            Exit Sub 
+      End Sub     
+      
+%REM
+********
+Sub CRMMudureGonder()
+********
+%END REM
+      Sub CRMMudureGonder()
+            On Error Goto ErrorHandler
+            Dim kisi
+            
+            logtext = Cstr(Now()) & " ~ CRM Müdür onayýna gönderildi ~ " & m_username
+            Call tarihceyeEkle(logtext, m_Doc)
+            
+            ' Yeni loglama mekanizmasý
+            strAction = "CRM Müdür onayýna gönderildi"
+            Call TarihceOlustur(m_Doc, m_Doc.Form(0), m_Doc.Form(0), m_Doc.talepNo(0), m_Doc.FormNo(0), strAction, strAciklama)
+            
+            m_Doc.dk= m_Doc.DK_CrmMudurOnay(0)
+            ' Burada mail gonderilecek kiþi sadece seçili sorumlu olmalý
+            ' m_Doc.Email_CRM_MUDUR = setYetkiliMail("CRM_MUDUR")
+            Set kisi = New Calisan(Strleft(m_Doc.CRMMudur(0), "-"))
+            m_Doc.Email_CRM_MUDUR = kisi.EMAIL
+            m_Doc.SendTo= m_Doc.Email_CRM_MUDUR
+            
+            ' Added by Shalini on 20-Jan for TLP-2011-6712 to add kampanyaTuru at the beginning of the subject incase of "frmKampAks" form
+            If m_Doc.Form(0)="frmKampAks" Then
+                  strKonu = KampTuru + m_Doc.talepNo(0)  + " iþlem no.lu "+m_Doc.kampanyaAd(0)+ " adlý kampanya ile ilgili " + m_Doc.aksiyonAd(0) + " isimli aksiyon tamamlanmak üzere onayýnýza gönderilmiþtir"
+            Else
+                  strKonu = KampTuru + m_Doc.talepNo(0)  + " iþlem no.lu "+m_Doc.kampanyaAd(0)+ " adlý kampanya ile ilgili " + m_Doc.aksiyonAd(0) + " isimli aksiyon tamamlanmak üzere onayýnýza gönderilmiþtir"
+            End If
+            'Till Here
+            
+            strIcerik = m_Doc.talepNo(0) + " iþlem no.lu "+m_Doc.kampanyaAd(0)+ " adlý kampanyaya ait " + Cstr(m_Doc.baslangicTarihi(0))+" tarihinde iþleme alýnmasý gereken " + m_Doc.aksiyonAd(0) + " isimli aksiyon tamamlanmak üzere onayýnýza gönderilmiþtir. <br />"
+            strIcerik = strIcerik+ "Ýlgili aksiyona eriþim için " 
+            strIcerik= strIcerik+ {<a href="http://}+server.Common+".akbank.com.tr/"+m_Doc.DBPath(0)+"/0/"+m_Doc.UniversalID+{?OpenDocument">} & "týklayýnýz." & {</a><br />}
+            strIcerik = strIcerik+ "Bilgi ve deðerlendirmelerinize sunulur.<br />"       
+            'mail /////////////////////////////////////////////////////////////////
+            
+            Call m_Doc.computeWithForm(True,False)
+            Call setDelegation("W", findYetkili())
+            
+            m_Doc.sendCc = getEmails(m_Doc.GetItemValue("DelegeAuthors"))
+            Call MailGonder(m_Doc.curUserMail(0), m_Doc.SendTo, m_Doc.sendCc, strKonu,  strIcerik)
+            m_Doc.sendCc = ""
+            
+            Call altDokGuncelle(m_Doc.dk(0), logtext)
+exitsub:
+            Exit Sub    
+ErrorHandler:
+            m_Doc.Action = "0"
+            m_Doc.Busy = "0"  
+            Call appLog.logError("LS:LsUygulamaAkis" , "UygulamaAkis - CRMMudureGonder", Err, Erl, Error$, PRIORITY_TYPE_YUKSEK, COPYTOGENERALLOGDB_HAYIR, COPYTOBO_HAYIR )
+            Exit Sub 
+      End Sub     
+      
+%REM
+********
+Sub CRMMudureGonder()
+********
+%END REM
+      Sub CRMBBOnayinaGonder()
+            On Error Goto ErrorHandler
+            Dim kisi
+            
+            logtext = Cstr(Now()) & " ~ CRM Bölüm Baþkaný onayýna gönderildi ~ " & m_username
+            Call tarihceyeEkle(logtext, m_Doc)
+            
+            ' Yeni loglama mekanizmasý
+            strAction = "CRM Bölüm Baþkaný onayýna gönderildi"
+            Call TarihceOlustur(m_Doc, m_Doc.Form(0), m_Doc.Form(0), m_Doc.talepNo(0), m_Doc.FormNo(0), strAction, strAciklama)
+            
+            m_Doc.dk= m_Doc.DK_CrmBBOnay(0)
+            ' Burada mail gonderilecek kiþi sadece seçili sorumlu olmalý
+            ' m_Doc.Email_CRM_BOLUMBASKANI = setYetkiliMail("CRM_BOLUMBASKANI")
+            Set kisi = New Calisan(Strleft(m_Doc.CRMBB(0), "-"))
+            m_Doc.Email_CRM_BOLUMBASKANI = kisi.EMAIL
+            m_Doc.SendTo= m_Doc.Email_CRM_BOLUMBASKANI
+            
+            ' Added by Shalini on 20-Jan for TLP-2011-6712 to add kampanyaTuru at the beginning of the subject incase of "frmKampAks" form
+            If m_Doc.Form(0)="frmKampAks" Then
+                  strKonu = KampTuru + m_Doc.talepNo(0)  + " iþlem no.lu "+m_Doc.kampanyaAd(0)+ " adlý kampanya ile ilgili " + m_Doc.aksiyonAd(0) + " isimli aksiyon tamamlanmak üzere onayýnýza gönderilmiþtir"
+            Else
+                  strKonu = KampTuru + m_Doc.talepNo(0) + " iþlem no.lu "+m_Doc.kampanyaAd(0)+ " adlý kampanya ile ilgili " + m_Doc.aksiyonAd(0) + " isimli aksiyon tamamlanmak üzere onayýnýza gönderilmiþtir"
+            End If
+            'Till Here
+            
+            strIcerik = m_Doc.talepNo(0) + " iþlem no.lu "+m_Doc.kampanyaAd(0)+ " adlý kampanyaya ait " + Cstr(m_Doc.baslangicTarihi(0))+" tarihinde iþleme alýnmasý gereken " + m_Doc.aksiyonAd(0) + " isimli aksiyon tamamlanmak üzere onayýnýza gönderilmiþtir. <br />"
+            strIcerik = strIcerik+ "Ýlgili aksiyona eriþim için " 
+            strIcerik= strIcerik+ {<a href="http://}+server.Common+".akbank.com.tr/"+m_Doc.DBPath(0)+"/0/"+m_Doc.UniversalID+{?OpenDocument">} & "týklayýnýz." & {</a><br />} 
+            strIcerik = strIcerik+ "Bilgi ve deðerlendirmelerinize sunulur.<br />"       
+            'mail /////////////////////////////////////////////////////////////////
+            
+            Call m_Doc.computeWithForm(True,False)
+            Call setDelegation("W", findYetkili())
+            
+            m_Doc.sendCc = getEmails(m_Doc.GetItemValue("DelegeAuthors"))
+            Call MailGonder(m_Doc.curUserMail(0), m_Doc.SendTo, m_Doc.sendCc, strKonu,  strIcerik)
+            m_Doc.sendCc = ""
+            
+            Call altDokGuncelle(m_Doc.dk(0), logtext)
+exitsub:
+            Exit Sub    
+ErrorHandler:
+            m_Doc.Action = "0"
+            m_Doc.Busy = "0"  
+            Call appLog.logError("LS:LsUygulamaAkis" , "UygulamaAkis - CRMBBOnayinaGonder", Err, Erl, Error$, PRIORITY_TYPE_YUKSEK, COPYTOGENERALLOGDB_HAYIR, COPYTOBO_HAYIR )
+            Exit Sub 
+      End Sub     
+      
+%REM
+********
+Sub iadeEt(strIadeTuru As String, strAltDokumanGuncelle As string)
+********
+%END REM
+      Sub iadeEt(strIadeTuru As String, strAltDokumanGuncelle As String)
+            On Error Goto ErrorHandler
+            
+            m_Doc.IadeEdildi = "1"
+            If m_Doc.IadeAciklama(0) = "" Then
+                  logtext = Cstr(Now()) & " ~ Ýade edildi ~ " & m_username
+            Else
+                  logtext = Cstr(Now()) & " ~ Ýade edildi ~ Açýklama ~ " & m_Doc.IadeAciklama(0) & " ~ "  &m_username
+            End If
+            
+            Call tarihceyeEkle(logtext, m_Doc)
+            
+            ' Yeni loglama mekanizmasý
+            strAction = "Ýade edildi"
+            strAciklama = m_Doc.IadeAciklama(0)
+            Call TarihceOlustur(m_Doc, m_Doc.Form(0), m_Doc.Form(0), m_Doc.talepNo(0), m_Doc.FormNo(0), strAction, strAciklama)
+            
+            'eski durumu al
+            m_Doc.dk_old = m_Doc.DK(0)
+            m_Doc.editorSicil_old = m_Doc.curUserSicil(0)
+            m_Doc.editor_old = m_username
+            m_Doc.editorMail_old = m_Doc.curUserMail(0)
+            m_Doc.sendCc = ""
+            If strIadeTuru = "GirisYapana" Then
+                  m_Doc.dk= m_Doc.DK_Iade(0)
+                  If m_Doc.Form(0) = "frmKampAks" Then
+                        If (m_Doc.kampanyaTuru(0) = "2-Recurrent") And ( (m_Doc.talepTuru(0) = "Müþteri Programý") Or (m_Doc.talepTuru(0) = "Süreç") ) Then
+                              m_Doc.OncekiKanallar = m_Doc.Kanallar
+                              m_Doc.OncekiKanallar_ID = m_Doc.Kanallar_ID
+                              m_Doc.OncekiKanallar_AD = m_Doc.Kanallar_AD
+                        End If
+                  End If
+                  m_Doc.SendTo= m_Doc.girisyapanmail(0)
+                  Call m_Doc.RemoveItem("ustOnay")
+                  If m_Doc.dk_old(0) >= m_Doc.DK_KampYonOnay(0) Then
+                        doTeklifBackup = True
+                  End If
+                  ' m_Doc.UstOnay = "0"
+            ElseIf strIadeTuru = "BirebirSYRed" Then
+                  m_Doc.dk= m_Doc.DK_Iade(0)
+                  If m_Doc.Form(0) = "frmKampAks" Then
+                        If (m_Doc.kampanyaTuru(0) = "2-Recurrent") And ( (m_Doc.talepTuru(0) = "Müþteri Programý") Or (m_Doc.talepTuru(0) = "Süreç") ) Then
+                              m_Doc.OncekiKanallar = m_Doc.Kanallar
+                              m_Doc.OncekiKanallar_ID = m_Doc.Kanallar_ID
+                              m_Doc.OncekiKanallar_AD = m_Doc.Kanallar_AD
+                        End If
+                  End If
+                  m_Doc.SendTo= m_Doc.girisyapanmail(0)
+                  m_Doc.BireBirSYDec = "0"
+                  m_Doc.BireBirSYDate = Now
+                  Call m_Doc.RemoveItem("ustOnay")
+                  If m_Doc.dk_old(0) >= m_Doc.DK_KampYonOnay(0) Then
+                        doTeklifBackup = True
+                  End If
+                  ' m_Doc.UstOnay = "0"
+            Elseif strIadeTuru = "KampSorRed" Then
+                  m_Doc.dk= m_Doc.DK_KampSorIade(0)
+                  If m_Doc.Form(0) = "frmKampAks" Then
+                        If (m_Doc.kampanyaTuru(0) = "2-Recurrent") And ( (m_Doc.talepTuru(0) = "Müþteri Programý") Or (m_Doc.talepTuru(0) = "Süreç") ) Then
+                              m_Doc.OncekiKanallar = m_Doc.Kanallar
+                              m_Doc.OncekiKanallar_ID = m_Doc.Kanallar_ID
+                              m_Doc.OncekiKanallar_AD = m_Doc.Kanallar_AD
+                        End If
+                  End If
+                  m_Doc.baslangicTarihiOrg = m_Doc.baslangicTarihi(0)
+                  m_Doc.IsKotaReserved = "1"
+                  m_Doc.SendTo= m_Doc.girisyapanmail(0)
+                  m_Doc.isKampSorIade = "1"
+                  doTeklifBackup = True
+                  
+                  ' Email kanalý seçildi ise, cc'de Brief Sorumlusuna da mail gönderilecek
+                  Dim evalResult As Variant
+                  evalResult = Evaluate({@IsMember("E-MAIL"; @Right(Kanallar; "-"):KANAL_AD)}, m_Doc)
+                  If evalResult(0) = 1 Then
+                        m_Doc.addCc = m_Doc.Email_BRIEF_SORUMLU
+                  End If
+                  
+                  ' Call m_Doc.RemoveItem("ustOnay") 
+                  ' m_Doc.UstOnay = "0"
+            Elseif strIadeTuru = "DataRedCrmYon" Then
+                  m_Doc.dk= m_Doc.DK_DataSorda(0)
+                  ' m_Doc.Email_DATA_SORUMLU = setYetkiliMail("DATA_SORUMLU")
+                  m_Doc.SendTo= m_Doc.Email_DATA_SORUMLU               
+            Elseif strIadeTuru = "KampYonSonRed" Then
+                  m_Doc.dk= m_Doc.DK_KamSorda(0)
+                  ' m_Doc.Email_KAMP_SORUMLU = setYetkiliMail("KAMP_SORUMLU")
+                  m_Doc.SendTo= m_Doc.Email_KAMP_SORUMLU
+            Elseif strIadeTuru = "CRMMudurRed" Then
+                  m_Doc.dk= m_Doc.DK_KampYonSonOnay(0)
+                  If m_Doc.Hasitem("sonYetkili") Then
+                        If m_Doc.sonYetkili(0) <> "BB" Then
+                              m_Doc.sonYetkili= "CRMMudur"
+                        End If
+                  Else
+                        m_Doc.sonYetkili= "CRMMudur"
+                  End If
+                  m_Doc.Email_KAMP_YONETICI = setYetkiliMail("KAMP_YONETICI")
+                  m_Doc.SendTo= m_Doc.Email_KAMP_YONETICI
+            Elseif strIadeTuru = "CRMBBRed" Then
+                  m_Doc.dk= m_Doc.DK_CrmMudurOnay(0)
+                  m_Doc.sonYetkili= "BB"
+                  ' m_Doc.Email_CRM_MUDUR = setYetkiliMail("CRM_MUDUR")
+                  m_Doc.SendTo= m_Doc.Email_CRM_MUDUR
+            Else
+                  Error 10001, "strIadeTuru - " + strIadeTuru + " : kodlanan iade türlerinden bir tanesi deðil!"
+            End If
+            
+            strKonu = KampTuru + m_Doc.talepNo(0)  + " iþlem no.lu "+m_Doc.kampanyaAd(0)+ " adlý kampanya ile ilgili " + m_Doc.aksiyonAd(0) + " adlý aksiyon iade edilmiþtir"
+            strIcerik = m_Doc.talepNo(0)  + " iþlem no.lu "+m_Doc.kampanyaAd(0)+ " adlý kampanya ait "+Cstr(m_Doc.GirisTarihi(0))+" tarihinde iþleme alýnmasý gereken " + m_Doc.aksiyonAd(0) + " adlý aksiyon "
+            If strIadeTuru = "BirebirSYRed" Then
+                  strIcerik = strIcerik+ "birebir segment seçimi uygun bulunmadýðý için " + m_Doc.curUserCN(0)+" tarafýndan iade edilmiþtir. <br />"
+            Else
+                  strIcerik = strIcerik+ m_Doc.curUserCN(0)+" tarafýndan iade edilmiþtir. <br />"
+            End If
+
+            strIcerik = strIcerik+ "Ýlgili aksiyona " 
+            strIcerik= strIcerik+ {<a href="http://}+server.Common+".akbank.com.tr/"+m_Doc.DBPath(0)+"/0/"+m_Doc.UniversalID+{?OpenDocument">} & "buradan " & {</a>}    
+            strIcerik = strIcerik+ "ulaþarak gerekli düzeltmeleri yapabilirsiniz. <br />"               
+            strIcerik = strIcerik+ "Bilgi ve deðerlendirmelerinize sunulur.<br />"       
+            
+            Call m_Doc.computeWithForm(True,False)
+            Call setDelegation("W", findYetkili())
+            
+            m_Doc.sendCc = getEmails(m_Doc.GetItemValue("DelegeAuthors"))
+            If m_Doc.Hasitem("addCc") Then
+                  m_Doc.sendCc = ArrayAppend(m_Doc.getItemValue("sendCc"), m_Doc.getItemValue("addCc"))
+            End If
+            Call MailGonder(m_Doc.curUserMail(0), m_Doc.SendTo, m_Doc.sendCc, strKonu,  strIcerik)
+            m_Doc.sendCc = ""
+            
+            If strAltDokumanGuncelle = "AltDokumanGuncelle" Then
+                  Call altDokGuncelle(m_Doc.dk(0), logtext) 
+            End If
+            
+exitsub:
+            Exit Sub    
+ErrorHandler:
+            m_Doc.Action = "0"
+            m_Doc.Busy = "0"  
+            Call appLog.logError("LS:LsUygulamaAkis" , "UygulamaAkis - iadeEt", Err, Erl, Error$, PRIORITY_TYPE_YUKSEK, COPYTOGENERALLOGDB_HAYIR, COPYTOBO_HAYIR )
+            Exit Sub 
+      End Sub
+      
+      %REM
+********
+Sub OnaylaBireyselMIY()
+********
+      %END REM
+      Sub OnaylaBireyselMIY()
+            On Error GoTo ErrorHandler
+            Dim sFormula As String
+            Dim eval As Variant
+            Dim blResult As Boolean
+            Dim ccSY As Variant
+            Dim varSYBilgi As Variant
+            
+            sFormula = {@IsMember("5"; segmentKodu) & @IsMember(kotaTipi; "Bireysel":"ADK":"Kobi":"Diðer") & isGirisYapanBirebirSY != "1"}
+            eval = Evaluate(sFormula, m_Doc)
+            blResult = eval(0)
+            If blResult Then
+                  ' Call appLog.logWarningSimple("lsUygulamaAkis", "OnaylaIsbYon", m_doc.FormNo(0) + " - Birebir Segment Yöneticisi onayýna gitti!")
+                  ' Call appLog.logWarningSimple("lsUygulamaAkis", "OnaylaIsbYon", m_doc.FormNo(0) + " - Birim : " + m_doc.kotaTipi(0))
+                  ' Call appLog.logWarningSimple("lsUygulamaAkis", "OnaylaIsbYon", m_doc.FormNo(0) + " - Segment : " + Implode(m_doc.segmentKodu, ", "))
+                  m_Doc.dk= m_Doc.DK_BirebirSYOnay(0)
+                  logtext = CStr(Now()) & " ~ Birebir Segment Yöneticisi onayýna gönderildi ~ " & m_username
+                  m_Doc.Email_BIREBIR_SY = setYetkiliMail("BIREBIR_SY")
+                  m_Doc.SendTo= m_Doc.Email_BIREBIR_SY
+                  
+                  Call tarihceyeEkle(logtext, m_Doc)
+                  
+                  ' Yeni loglama mekanizmasý
+                  strAction = "Birebir Segment Yöneticisi onayýna gönderildi"
+                  Call TarihceOlustur(m_Doc, m_Doc.Form(0), m_Doc.Form(0), m_Doc.talepNo(0), m_Doc.FormNo(0), strAction, strAciklama)
+
+                  'cc'ye gidecekler belirleniyor \\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\            
+                  m_Doc.sendCc = ""
+                  ccSY = m_Doc.Getitemvalue("sendCc")
+                  'cc'ye gidecekler belirleniyor /////////////////////////////////////////////////////////////////            
+            Else
+                  ' Call appLog.logWarningSimple("lsUygulamaAkis", "OnaylaIsbYon", m_doc.FormNo(0) + " - Kampanya Yöneticisi onayýna gitti!")
+                  ' Call appLog.logWarningSimple("lsUygulamaAkis", "OnaylaIsbYon", m_doc.FormNo(0) + " - Birim : " + m_doc.kotaTipi(0))
+                  ' Call appLog.logWarningSimple("lsUygulamaAkis", "OnaylaIsbYon", m_doc.FormNo(0) + " - Segment : " + Implode(m_doc.segmentKodu, ", "))
+                  m_Doc.dk= m_Doc.DK_KampYonOnay(0)
+                  Call createCMDScript()
+                  logtext = CStr(Now()) & " ~ Kampanya Yöneticisi onayýna gönderildi ~ " & m_username
+                  m_Doc.Email_KAMP_YONETICI = setYetkiliMail("KAMP_YONETICI")
+                  m_Doc.SendTo= m_Doc.Email_KAMP_YONETICI              
+                  
+                  Call tarihceyeEkle(logtext, m_Doc)
+                  
+                  ' Yeni loglama mekanizmasý
+                  strAction = "Kampanya Yöneticisi onayýna gönderildi"
+                  Call TarihceOlustur(m_Doc, m_Doc.Form(0), m_Doc.Form(0), m_Doc.talepNo(0), m_Doc.FormNo(0), strAction, strAciklama)
+                  
+                  'cc'ye gidecekler belirleniyor \\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\            
+                  m_Doc.sendCc = ""
+                  m_Doc.SYBilgi = ""
+                  ccSY = m_Doc.Getitemvalue("sendCc")
+                  varSYBilgi = m_Doc.getItemValue("SYBilgi")
+                  sFormula = {@IsMember("5"; segmentKodu) & !(@IsMember(kotaTipi; "Bireysel":"ADK":"Kobi":"Diðer")) & isGirisYapanBirebirSY != "1"}
+                  eval = Evaluate(sFormula, m_Doc)
+                  blResult = eval(0)
+                  If blResult Then
+                        ccSY = ArrayAppend(ccSY, setYetkiliMail("BIREBIR_SY"))
+                        varSYBilgi = ArrayAppend(varSYBilgi, "BIREBIR")
+                  End If
+                  sFormula = {@IsMember("6"; segmentKodu) | @IsMember("13"; segmentKodu)}
+                  eval = Evaluate(sFormula, m_Doc)
+                  blResult = eval(0)
+                  If blResult Then
+                        ccSY = ArrayAppend(ccSY, setYetkiliMail("BIREYSEL_SY"))
+                        varSYBilgi = ArrayAppend(varSYBilgi, "BIREYSEL")
+                  End If
+                  sFormula = {@IsMember("3"; segmentKodu) | @IsMember("7"; segmentKodu)}
+                  eval = Evaluate(sFormula, m_Doc)
+                  blResult = eval(0)
+                  If blResult Then
+                        ccSY = ArrayAppend(ccSY, setYetkiliMail("MIKRO_SIRKET_SY"))
+                        varSYBilgi = ArrayAppend(varSYBilgi, "MIKRO_SIRKET")
+                  End If
+                  m_Doc.SYBilgi = varSYBilgi
+                  m_Doc.SYBilgi = Evaluate({@Trim(SYBilgi)}, m_Doc)
+                  If m_Doc.SYBilgi(0) <> "" Then
+                        m_Doc.SYBilgiDate = Now
+                  End If
+                  'cc'ye gidecekler belirleniyor /////////////////////////////////////////////////////////////////            
+            End If
+            
+            'mail \\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\            
+            strKonu = KampTuru + m_Doc.talepNo(0)  + " iþlem no.lu "+m_Doc.kampanyaAd(0)+ " adlý kampanya ile ilgili " + m_Doc.aksiyonAd(0) + " isimli aksiyon"
+            strIcerik = m_Doc.talepNo(0) + " iþlem no.lu "+m_Doc.kampanyaAd(0)+ " adlý kampanyaya ait " + m_Doc.aksiyonAd(0) + " isimli aksiyonun "+Cstr(m_Doc.baslangicTarihi(0))+" tarihinde iþleme alýnmasý yönünde"
+            If m_Doc.dk(0)= m_Doc.DK_BirebirSYOnay(0) Then
+                  strKonu = strKonu + " onayýnýza gönderilmiþtir!"
+                  strIcerik = strIcerik+ " segment deðerlendirmesi amaçlý onayýnýza gönderilmiþtir. <br />"
+            Else  
+                  strKonu = strKonu + " talep giriþi yapýlmýþtýr!"
+                  strIcerik = strIcerik+ " talep giriþi yapýlmýþtýr. <br />"
+            End If
+            strIcerik = strIcerik+ "Ýlgili aksiyona eriþim için " 
+            strIcerik= strIcerik+ {<a href="http://}+server.Common+".akbank.com.tr/"+m_Doc.DBPath(0)+"/0/"+m_Doc.UniversalID+{?OpenDocument">} & "týklayýnýz." & {</a><br />} 
+            strIcerik = strIcerik+ "Bilgi ve deðerlendirmelerinize sunulur.<br />"       
+            'mail /////////////////////////////////////////////////////////////////
+            
+            Call m_Doc.computeWithForm(True,False)
+            Call setDelegation("W", findYetkili())
+            
+            m_Doc.sendCc = ArrayUnique(ArrayAppend(ccSY, getEmails(m_Doc.GetItemValue("DelegeAuthors"))))
+            Call MailGonder(m_Doc.curUserMail(0), m_Doc.SendTo, m_Doc.sendCc, strKonu,  strIcerik)
+            m_Doc.sendCc = ""
+
+            ' Bireysel MIY Segment Dahil Edilecek mi alaný Hayýr'a deðiþtirilmiþ ise Talep Yapana bilgilendirme maili gönder
+            If m_Doc.BireyselMIYSegmentDahil(0) = "Hayýr" Then
+                  'mail \\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\            
+                  strKonu = KampTuru + m_Doc.talepNo(0)  + " iþlem no.lu "+m_Doc.kampanyaAd(0)+ " adlý kampanya ile ilgili " + m_Doc.aksiyonAd(0) + " isimli aksiyon hakkýnda..."
+                  strIcerik = m_Doc.talepNo(0)  + " iþlem no.lu "+m_Doc.kampanyaAd(0)+ " adlý kampanya ait "+Cstr(m_Doc.GirisTarihi(0))+" tarihinde iþleme alýnmasý gereken " + m_Doc.aksiyonAd(0) + " adlý aksiyon "
+                  strIcerik = strIcerik+ "uygun bulunmadýðý için " + m_Doc.curUserCN(0)+" tarafýndan Bireysel MIY Segment Dahil edilmeyecek þekilde onaylanmýþtýr. <br />"
+                  strIcerik = strIcerik+ "Ýlgili aksiyona eriþim için " 
+                  strIcerik= strIcerik+ {<a href="http://}+server.Common+".akbank.com.tr/"+m_Doc.DBPath(0)+"/0/"+m_Doc.UniversalID+{?OpenDocument">} & "týklayýnýz." & {</a><br />} 
+                  strIcerik = strIcerik+ "Bilgi ve deðerlendirmelerinize sunulur.<br />"       
+                  'mail /////////////////////////////////////////////////////////////////
+                  
+                  Call MailGonder(m_Doc.curUserMail(0), m_Doc.girisyapanmail, m_Doc.sendCc, strKonu,  strIcerik)
+            End If
+            Call altDokGuncelle(m_Doc.dk(0), logtext)
+exitsub:
+            Exit Sub    
+ErrorHandler:
+            m_Doc.Action = "0"
+            m_Doc.Busy = "0"  
+            Call appLog.logError("LS:LsUygulamaAkis" , "UygulamaAkis - OnaylaBireyselMIY", Err, Erl, Error$, PRIORITY_TYPE_YUKSEK, COPYTOGENERALLOGDB_HAYIR, COPYTOBO_HAYIR )
+            Exit Sub 
+      End Sub
+      
+%REM
+********
+Sub OnaylaIsbYon()
+********
+%END REM
+      Sub OnaylaIsbYon()
+            On Error Goto ErrorHandler
+            Dim sFormula As String
+            Dim eval As Variant
+            Dim blResult As Boolean
+            Dim ccSY As Variant
+            Dim varSYBilgi As Variant
+            
+            m_Doc.sendCc = ""
+            ccSY = m_Doc.Getitemvalue("sendCc")
+
+            sFormula = {@IsMember("5"; segmentKodu) & @IsMember(kotaTipi; "Bireysel":"ADK":"Kobi":"Diðer") & isGirisYapanBirebirSY != "1"}
+            eval = Evaluate(sFormula, m_Doc)
+            blResult = eval(0)
+            If m_Doc.BireyselMIYSegmentDahil(0) = "Evet" And m_Doc.isKampSorIade(0) <> "1" Then
+                  m_Doc.dk= m_Doc.DK_BireyselMIYOnay(0)
+                  logtext = CStr(Now()) & " ~ Bireysel MIY Segment Onaycýsý onayýna gönderildi ~ " & m_username
+                  m_Doc.Email_BIREYSEL_MIY = setYetkiliMail("BIREYSEL_MIY_ONAYCI")
+                  m_Doc.SendTo= m_Doc.Email_BIREYSEL_MIY
+                  
+                  Call tarihceyeEkle(logtext, m_Doc)
+                  
+                  ' Yeni loglama mekanizmasý
+                  strAction = "Bireysel MIY Segment Onaycýsý onayýna gönderildi"
+                  Call TarihceOlustur(m_Doc, m_Doc.Form(0), m_Doc.Form(0), m_Doc.talepNo(0), m_Doc.FormNo(0), strAction, strAciklama)
+
+                  'cc'ye gidecekler belirleniyor \\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\            
+                  m_Doc.sendCc = ""
+                  ccSY = m_Doc.Getitemvalue("sendCc")
+            ElseIf blResult And m_Doc.isKampSorIade(0) <> "1" Then
+                  ' Call appLog.logWarningSimple("lsUygulamaAkis", "OnaylaIsbYon", m_doc.FormNo(0) + " - Birebir Segment Yöneticisi onayýna gitti!")
+                  ' Call appLog.logWarningSimple("lsUygulamaAkis", "OnaylaIsbYon", m_doc.FormNo(0) + " - Birim : " + m_doc.kotaTipi(0))
+                  ' Call appLog.logWarningSimple("lsUygulamaAkis", "OnaylaIsbYon", m_doc.FormNo(0) + " - Segment : " + Implode(m_doc.segmentKodu, ", "))
+                  m_Doc.dk= m_Doc.DK_BirebirSYOnay(0)
+                  logtext = CStr(Now()) & " ~ Birebir Segment Yöneticisi onayýna gönderildi ~ " & m_username
+                  m_Doc.Email_BIREBIR_SY = setYetkiliMail("BIREBIR_SY")
+                  m_Doc.SendTo= m_Doc.Email_BIREBIR_SY
+                  
+                  Call tarihceyeEkle(logtext, m_Doc)
+                  
+                  ' Yeni loglama mekanizmasý
+                  strAction = "Birebir Segment Yöneticisi onayýna gönderildi"
+                  Call TarihceOlustur(m_Doc, m_Doc.Form(0), m_Doc.Form(0), m_Doc.talepNo(0), m_Doc.FormNo(0), strAction, strAciklama)
+
+                  'cc'ye gidecekler belirleniyor \\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\            
+                  m_Doc.sendCc = ""
+                  ccSY = m_Doc.Getitemvalue("sendCc")
+                  'cc'ye gidecekler belirleniyor /////////////////////////////////////////////////////////////////            
+           Else
+                  ' Call appLog.logWarningSimple("lsUygulamaAkis", "OnaylaIsbYon", m_doc.FormNo(0) + " - Kampanya Yöneticisi onayýna gitti!")
+                  ' Call appLog.logWarningSimple("lsUygulamaAkis", "OnaylaIsbYon", m_doc.FormNo(0) + " - Birim : " + m_doc.kotaTipi(0))
+                  ' Call appLog.logWarningSimple("lsUygulamaAkis", "OnaylaIsbYon", m_doc.FormNo(0) + " - Segment : " + Implode(m_doc.segmentKodu, ", "))
+                  m_Doc.dk= m_Doc.DK_KampYonOnay(0)
+                  Call createCMDScript()
+                  logtext = Cstr(Now()) & " ~ Kampanya Yöneticisi onayýna gönderildi ~ " & m_username
+                  m_Doc.Email_KAMP_YONETICI = setYetkiliMail("KAMP_YONETICI")
+                  m_Doc.SendTo= m_Doc.Email_KAMP_YONETICI              
+                  
+                  Call tarihceyeEkle(logtext, m_Doc)
+                  
+                  ' Yeni loglama mekanizmasý
+                  strAction = "Kampanya Yöneticisi onayýna gönderildi"
+                  Call TarihceOlustur(m_Doc, m_Doc.Form(0), m_Doc.Form(0), m_Doc.talepNo(0), m_Doc.FormNo(0), strAction, strAciklama)
+                  
+                  'cc'ye gidecekler belirleniyor \\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\            
+                  m_Doc.sendCc = ""
+                  ccSY = m_Doc.Getitemvalue("sendCc")
+                  If m_Doc.isKampSorIade(0) <> "1" Then
+                        m_Doc.SYBilgi = ""
+                        ccSY = m_Doc.Getitemvalue("sendCc")
+                        varSYBilgi = m_Doc.getItemValue("SYBilgi")
+                        sFormula = {@IsMember("5"; segmentKodu) & !(@IsMember(kotaTipi; "Bireysel":"ADK":"Kobi":"Diðer")) & isGirisYapanBirebirSY != "1"}
+                        eval = Evaluate(sFormula, m_Doc)
+                        blResult = eval(0)
+                        If blResult Then
+                              ccSY = ArrayAppend(ccSY, setYetkiliMail("BIREBIR_SY"))
+                              varSYBilgi = ArrayAppend(varSYBilgi, "BIREBIR")
+                        End If
+                        sFormula = {@IsMember("6"; segmentKodu) | @IsMember("13"; segmentKodu)}
+                        eval = Evaluate(sFormula, m_Doc)
+                        blResult = eval(0)
+                        If blResult Then
+                              ccSY = ArrayAppend(ccSY, setYetkiliMail("BIREYSEL_SY"))
+                              varSYBilgi = ArrayAppend(varSYBilgi, "BIREYSEL")
+                        End If
+                        sFormula = {@IsMember("3"; segmentKodu) | @IsMember("7"; segmentKodu)}
+                        eval = Evaluate(sFormula, m_Doc)
+                        blResult = eval(0)
+                        If blResult Then
+                              ccSY = ArrayAppend(ccSY, setYetkiliMail("MIKRO_SIRKET_SY"))
+                              varSYBilgi = ArrayAppend(varSYBilgi, "MIKRO_SIRKET")
+                        End If
+                        m_Doc.SYBilgi = varSYBilgi
+                        m_Doc.SYBilgi = Evaluate({@Trim(SYBilgi)}, m_Doc)
+                        If m_Doc.SYBilgi(0) <> "" Then
+                              m_Doc.SYBilgiDate = Now
+                        End If
+                  End If
+                  'cc'ye gidecekler belirleniyor /////////////////////////////////////////////////////////////////            
+            End If
+            
+            'mail \\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\            
+            strKonu = KampTuru + m_Doc.talepNo(0)  + " iþlem no.lu "+m_Doc.kampanyaAd(0)+ " adlý kampanya ile ilgili " + m_Doc.aksiyonAd(0) + " isimli aksiyon"
+            strIcerik = m_Doc.talepNo(0) + " iþlem no.lu "+m_Doc.kampanyaAd(0)+ " adlý kampanyaya ait " + m_Doc.aksiyonAd(0) + " isimli aksiyonun "+Cstr(m_Doc.baslangicTarihi(0))+" tarihinde iþleme alýnmasý yönünde"
+            If m_Doc.dk(0)= m_Doc.DK_BireyselMIYOnay(0) Then
+                  strKonu = strKonu + " onayýnýza gönderilmiþtir!"
+                  strIcerik = strIcerik+ " Bireysel MIY segment deðerlendirmesi amaçlý onayýnýza gönderilmiþtir. <br />"
+            ElseIf m_Doc.dk(0)= m_Doc.DK_BirebirSYOnay(0) Then
+                  strKonu = strKonu + " onayýnýza gönderilmiþtir!"
+                  strIcerik = strIcerik+ " segment deðerlendirmesi amaçlý onayýnýza gönderilmiþtir. <br />"
+            Else  
+                  strKonu = strKonu + " talep giriþi yapýlmýþtýr!"
+                  strIcerik = strIcerik+ " talep giriþi yapýlmýþtýr. <br />"
+            End If
+            strIcerik = strIcerik+ "Ýlgili aksiyona eriþim için " 
+            strIcerik= strIcerik+ {<a href="http://}+server.Common+".akbank.com.tr/"+m_Doc.DBPath(0)+"/0/"+m_Doc.UniversalID+{?OpenDocument">} & "týklayýnýz." & {</a><br />} 
+            strIcerik = strIcerik+ "Bilgi ve deðerlendirmelerinize sunulur.<br />"       
+            'mail /////////////////////////////////////////////////////////////////
+            
+            Call m_Doc.computeWithForm(True,False)
+            Call setDelegation("W", findYetkili())
+            
+            m_Doc.sendCc = ArrayUnique(ArrayAppend(ccSY, getEmails(m_Doc.GetItemValue("DelegeAuthors"))))
+            Call MailGonder(m_Doc.curUserMail(0), m_Doc.SendTo, m_Doc.sendCc, strKonu,  strIcerik)
+            m_Doc.sendCc = ""
+            
+            Call altDokGuncelle(m_Doc.dk(0), logtext)
+exitsub:
+            Exit Sub    
+ErrorHandler:
+            m_Doc.Action = "0"
+            m_Doc.Busy = "0"  
+            Call appLog.logError("LS:LsUygulamaAkis" , "UygulamaAkis - OnaylaIsbYon", Err, Erl, Error$, PRIORITY_TYPE_YUKSEK, COPYTOGENERALLOGDB_HAYIR, COPYTOBO_HAYIR )
+            Exit Sub 
+      End Sub
+      
+%REM
+********
+Sub KampSorISBOnayi()
+********
+%END REM
+      Sub KampSorISBOnayi()
+            On Error Goto ErrorHandler
+            
+            logtext = Cstr(Now()) & " ~ Kampanya Yöneticisi onayýna gönderildi ~ " & m_username
+            Call tarihceyeEkle(logtext, m_Doc)
+            
+            ' Yeni loglama mekanizmasý
+            strAction = "Kampanya Yöneticisi onayýna gönderildi"
+            Call TarihceOlustur(m_Doc, m_Doc.Form(0), m_Doc.Form(0), m_Doc.talepNo(0), m_Doc.FormNo(0), strAction, strAciklama)
+            
+            m_Doc.dk= m_Doc.DK_KampYonSonOnay(0)
+            ' Burada mail gonderilecek kiþi sadece seçili sorumlu olmalý
+            m_Doc.Email_KAMP_YONETICI = setYetkiliMail("KAMP_YONETICI")
+            m_Doc.SendTo= m_Doc.Email_KAMP_YONETICI              
+            
+            'mail \\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\            
+            m_Doc.sendCc = "" 
+            
+            ' Added by Shalini on 20-Jan for TLP-2011-6712 to add kampanyaTuru at the beginning of the subject incase of "frmKampAks" form
+            If m_Doc.Form(0)="frmKampAks" Then
+                  strKonu = KampTuru + m_Doc.talepNo(0)  + " iþlem no.lu "+m_Doc.kampanyaAd(0)+ " adlý kampanya ile ilgili " + m_Doc.aksiyonAd(0) + " isimli aksiyon onayýnýza gönderilmiþtir"
+            Else
+                  strKonu = KampTuru + m_Doc.talepNo(0)  + " iþlem no.lu "+m_Doc.kampanyaAd(0)+ " adlý kampanya ile ilgili " + m_Doc.aksiyonAd(0) + " isimli aksiyon onayýnýza gönderilmiþtir"
+            End If
+            'Till Here
+            
+            strIcerik = m_Doc.talepNo(0) + " iþlem no.lu "+m_Doc.kampanyaAd(0)+ " adlý kampanyaya ait " + Cstr(m_Doc.baslangicTarihi(0))+" tarihinde iþleme alýnmasý gereken " + m_Doc.aksiyonAd(0) + " isimli aksiyon onayýnýza gönderilmiþtir. <br />"
+            strIcerik = strIcerik+ "Ýlgili aksiyona eriþim için " 
+            strIcerik= strIcerik+ {<a href="http://}+server.Common+".akbank.com.tr/"+m_Doc.DBPath(0)+"/0/"+m_Doc.UniversalID+{?OpenDocument">} & "týklayýnýz." & {</a><br />} 
+            strIcerik = strIcerik+ "Bilgi ve deðerlendirmelerinize sunulur.<br />"       
+            'mail /////////////////////////////////////////////////////////////////
+            
+            Call m_Doc.computeWithForm(True,False)
+            Call setDelegation("W", findYetkili())
+            
+            m_Doc.sendCc = getEmails(m_Doc.GetItemValue("DelegeAuthors"))
+            Call MailGonder(m_Doc.curUserMail(0), m_Doc.SendTo, m_Doc.sendCc, strKonu,  strIcerik)
+            m_Doc.sendCc = ""
+            
+            Call altDokGuncelle(m_Doc.dk(0),logtext)
+exitsub:
+            Exit Sub
+ErrorHandler:
+            m_Doc.Action = "0"
+            m_Doc.Busy = "0"
+            Call appLog.logError("LS:LsUygulamaAkis" , "UygulamaAkis - KampSorISBOnayi", Err, Erl, Error$, PRIORITY_TYPE_YUKSEK, COPYTOGENERALLOGDB_HAYIR, COPYTOBO_HAYIR )
+            Exit Sub
+      End Sub
+      
+      %REM
+            Sub TeklifDataYedekle
+            Description: Comments for Sub
+      %END REM
+      Sub TeklifDataYedekle()
+            Dim collTeklif As NotesDocumentCollection
+            Dim docTeklif As NotesDocument
+            
+            Set collTeklif = class_db.Search({Form = "frmAksTeklif" & ParentUNID = "} + m_Doc.Universalid + {" & DK != DK_Iptal}, Nothing, 0)
+            Set docTeklif = collTeklif.Getfirstdocument()
+            Do Until docTeklif Is Nothing
+                  ' Backup Field Values to _Org fields
+                  docTeklif.teklifAd_Org = docTeklif.teklifAd
+                  docTeklif.teklifKitleTanimi_Org = docTeklif.teklifKitleTanimi
+                  docTeklif.teklifAciklama_Org = docTeklif.teklifAciklama
+                  docTeklif.kampanyaUrunu_Org = docTeklif.kampanyaUrunu
+                  docTeklif.kampanyaUrunu_Diger_Org = docTeklif.kampanyaUrunu_Diger
+                  docTeklif.emailSubject_Org = docTeklif.emailSubject
+                  docTeklif.smsMetni_Org = docTeklif.smsMetni
+                  docTeklif.subeRol_Org = docTeklif.subeRol
+                  docTeklif.subeScript_Org = docTeklif.subeScript
+                  docTeklif.cagriMerkezScript_Org = docTeklif.cagriMerkezScript
+                  docTeklif.digerScript_Org = docTeklif.digerScript
+                  
+                  Call docTeklif.Save(True, False, False)
+                                   
+                  Set docTeklif = collTeklif.Getnextdocument(docTeklif)
+            Loop
+            
+      End Sub
+      
+%REM
+********
+Sub OnaylaKampYon()
+********
+%END REM
+      Sub OnaylaKampYon()
+            On Error Goto ErrorHandler
+            Dim kisi
+            
+            ' Call appLog.logWarningSimple("LS:LsUygulamaAkis" , "UygulamaAkis - OnaylaKampYon", m_Doc.FormNo(0) + " - Kampanya Yöneticisi onaylama iþlemi baþladý!")
+
+            'Veri Madenciliði Yöneticisi seçilmiþ ise CRMYonOnay, deðilse Kamsorda
+            If (m_Doc.CRMYonetici(0) = "") Or (m_Doc.CRMYonetici(0) = "Seçiniz") Then
+                  ' Call appLog.logWarningSimple("LS:LsUygulamaAkis" , "UygulamaAkis - OnaylaKampYon", m_Doc.FormNo(0) + " - Form Kampanya Sorumlusuna gönderilecek!")
+                  m_Doc.dk= m_Doc.DK_KamSorda(0)
+                  logtext = Cstr(Now()) & " ~ Kampanya Sorumlusuna gönderildi ~ " & m_username
+                  ' Yeni loglama mekanizmasý
+                  strAction = "Kampanya Sorumlusuna gönderildi"
+                  ' Burada mail gonderilecek kiþi sadece seçili sorumlu olmalý
+                  ' m_Doc.Email_KAMP_SORUMLU = setYetkiliMail("KAMP_SORUMLU")
+                  Set kisi = New Calisan(Strleft(m_Doc.KampSorumlusu(0), "-"))
+                  m_Doc.Email_KAMP_SORUMLU = kisi.EMAIL
+                  m_Doc.SendTo= m_Doc.Email_KAMP_SORUMLU(0)
+                  Call teklifDataYedekle()
+            Else
+                  ' Call appLog.logWarningSimple("LS:LsUygulamaAkis" , "UygulamaAkis - OnaylaKampYon", m_Doc.FormNo(0) + " - Form Veri Madenciliði Yöneticisine gönderilecek!")
+                  m_Doc.dk= m_Doc.DK_CrmYonOnay(0)
+                  logtext = Cstr(Now()) & " ~ Veri Madenciliði Yöneticisine gönderildi ~ " & m_username
+                  ' Yeni loglama mekanizmasý
+                  strAction = "Veri Madenciliði Yöneticisine gönderildi"
+                  ' Burada mail gonderilecek kiþi sadece seçili sorumlu olmalý
+                  ' m_Doc.Email_CRM_SORUMLU = setYetkiliMail("CRM_YONETICI")
+                  Set kisi = New Calisan(Strleft(m_Doc.CRMYonetici(0), "-"))
+                  m_Doc.Email_CRM_SORUMLU = kisi.EMAIL
+                  m_Doc.SendTo= m_Doc.Email_CRM_SORUMLU                
+            End If
+            Call tarihceyeEkle(logtext, m_Doc)
+            
+            ' Yeni loglama mekanizmasý
+            ' strAction = "Kampanya Yöneticisi onayýna gönderildi"
+            Call TarihceOlustur(m_Doc, m_Doc.Form(0), m_Doc.Form(0), m_Doc.talepNo(0), m_Doc.FormNo(0), strAction, strAciklama)
+            ' Call appLog.logWarningSimple("LS:LsUygulamaAkis" , "UygulamaAkis - OnaylaKampYon", m_Doc.FormNo(0) + " - Tarihçe oluþturuldu!")
+            
+            'mail \\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\            
+            ' Email kanalý seçildi ise, Brief Sorumlusu da mailde To'da olmalý
+            Dim evalResult As Variant
+            evalResult = Evaluate({@IsMember("E-MAIL"; @Right(Kanallar; "-"):KANAL_AD) & emailHTMLTip = "Hazýrlanmýþ HTML":"Yeni HTML"}, m_Doc)
+            If evalResult(0) = 1 Then
+                  Set kisi = New Calisan(StrLeft(m_Doc.BriefSorumlusu(0), "-"))
+                  m_Doc.Email_BRIEF_SORUMLU = kisi.EMAIL
+                  m_Doc.SendTo = ArrayAppend(m_Doc.GetItemValue("SendTo"), m_Doc.Email_BRIEF_SORUMLU)
+            End If
+            
+            m_Doc.sendCc = ""
+            
+            ' Added by Shalini on 20-Jan for TLP-2011-6712 to add kampanyaTuru at the beginning of the subject incase of "frmKampAks" form
+            If m_Doc.Form(0)="frmKampAks" Then
+                  strKonu = KampTuru + m_Doc.talepNo(0) + " iþlem no.lu "+m_Doc.kampanyaAd(0)+ " adlý kampanya ile ilgili " + m_Doc.aksiyonAd(0) + " isimli aksiyon onaylanmýþtýr"
+            Else
+                  strKonu = KampTuru + m_Doc.talepNo(0)  + " iþlem no.lu "+m_Doc.kampanyaAd(0)+ " adlý kampanya ile ilgili " + m_Doc.aksiyonAd(0) + " isimli aksiyon onaylanmýþtýr"
+            End If
+            'Till Here
+            
+            strIcerik = m_Doc.talepNo(0) + " iþlem no.lu "+m_Doc.kampanyaAd(0)+ " adlý kampanyaya ait " + Cstr(m_Doc.baslangicTarihi(0))+" tarihinde iþleme alýnmasý gereken " + m_Doc.aksiyonAd(0) + " isimli aksiyon "+m_Doc.curUserCN(0)+" tarafýndan onaylanmýþtýr. <br />"
+            strIcerik = strIcerik+ "Ýlgili aksiyona eriþim için " 
+            strIcerik= strIcerik+ {<a href="http://}+server.Common+".akbank.com.tr/"+m_Doc.DBPath(0)+"/0/"+m_Doc.UniversalID+{?OpenDocument">} & "týklayýnýz." & {</a><br />} 
+            strIcerik = strIcerik+ "Bilgi ve deðerlendirmelerinize sunulur.<br />"       
+            'mail /////////////////////////////////////////////////////////////////
+            
+            Call m_Doc.computeWithForm(True,False)
+            Call setDelegation("W", findYetkili())
+            ' Call appLog.logWarningSimple("LS:LsUygulamaAkis" , "UygulamaAkis - OnaylaKampYon", m_Doc.FormNo(0) + " - Delegasyonlar hesaplandý!")
+            
+            m_Doc.sendCc = getEmails(m_Doc.GetItemValue("DelegeAuthors"))
+            ' Email kanalý seçildi ise, KIB de mailde Cc'de olmalý
+            If evalResult(0) = 1 Then
+                  m_Doc.Email_KIB_SORUMLU = setYetkiliMail("KIB")
+                  m_Doc.sendCc = ArrayAppend(m_Doc.GetItemValue("sendCc"), m_Doc.GetItemValue("Email_KIB_SORUMLU"))
+            End If
+            Call MailGonder(m_Doc.curUserMail(0), m_Doc.SendTo, m_Doc.sendCc, strKonu,  strIcerik)
+            m_Doc.sendCc = ""
+            ' Call appLog.logWarningSimple("LS:LsUygulamaAkis" , "UygulamaAkis - OnaylaKampYon", m_Doc.FormNo(0) + " - Mail bilgilendirmesi yapýldý!")
+            
+            'Email Kanalý seçildi ise, brief sürecini baþlat
+            Dim briefDoc As NotesDocument
+            
+            Set briefDoc = class_briefView.Getdocumentbykey(m_Doc.Universalid, True)
+            If evalResult(0) = 1 Then
+                  Dim brief_UygulamaAkis As UygulamaAkis
+                  If Not briefDoc Is Nothing Then
+                        If (briefDoc.DK(0) < briefDoc.DK_BriefSorda(0)) And (briefDoc.DK(0) <> briefDoc.DK_Iade(0)) Then
+                              briefDoc.BriefSorumlusu = m_Doc.BriefSorumlusu
+                              Set brief_UygulamaAkis = New UygulamaAkis(briefDoc, m_username, m_sicil)
+                              ' Call appLog.logWarningSimple("LS:LsUygulamaAkis" , "UygulamaAkis - OnaylaKampYon", m_Doc.FormNo(0) + " - EMAIL aksiyonu olduðu için brief süreci baþlatýlacak!")
+                              Call brief_UygulamaAkis.briefGonder()
+                              ' Call appLog.logWarningSimple("LS:LsUygulamaAkis" , "UygulamaAkis - OnaylaKampYon", m_Doc.FormNo(0) + " - EMAIL aksiyonu olduðu için brief süreci iþletildi!")
+                              
+                              Call briefDoc.Save(True, False)
+                              ' Call appLog.logWarningSimple("LS:LsUygulamaAkis" , "UygulamaAkis - OnaylaKampYon", m_Doc.FormNo(0) + " - Brief dokümaný kaydedildi!")
+                        Else
+                              ' Call appLog.logWarningSimple("LS:LsUygulamaAkis" , "UygulamaAkis - OnaylaKampYon", briefDoc.FormNo(0) + " - Brief statüsü uygun olmadýðýndan Brief Sorumlusuna atama yapýlmadý!")
+                        End If
+                  Else
+                        ' Call appLog.logWarningSimple("LS:LsUygulamaAkis" , "UygulamaAkis - OnaylaKampYon", briefDoc.FormNo(0) + " - Brief dokümaný bulunamadýðýndan Brief Sorumlusuna atama yapýlmadý!")
+                  End If
+            ElseIf m_Doc.DK(0) = m_Doc.DK_KamSorda(0) Then
+                  If Not briefDoc Is Nothing Then Call briefDoc.Removepermanently(True)
+            End If
+
+            Call altDokGuncelle(m_Doc.dk(0), logtext)
+            ' Call appLog.logWarningSimple("LS:LsUygulamaAkis" , "UygulamaAkis - OnaylaKampYon", m_Doc.FormNo(0) + " - Kampanya Yöneticisi onaylama iþlemi bitti!")
+                        
+      exitsub:
+            Exit Sub    
+      ErrorHandler:
+            m_Doc.Action = "0"
+            m_Doc.Busy = "0"  
+            Call appLog.logError("LS:LsUygulamaAkis" , "UygulamaAkis - OnaylaKampYon", Err, Erl, Error$, PRIORITY_TYPE_YUKSEK, COPYTOGENERALLOGDB_HAYIR, COPYTOBO_HAYIR )
+            Exit Sub 
+      End Sub
+      
+%REM
+********
+Sub briefGonder()
+********
+%END REM
+      Sub briefGonder()
+            On Error GoTo ErrorHandler
+            Dim ndAks As NotesDocument
+            Dim kisi
+            Dim isIade As Boolean
+            
+            ' Ýade edilen brief tekrar gönderiliyorsa
+            If m_Doc.dk(0) = m_Doc.DK_Iade(0) Then isIade = True
+            
+            m_Doc.dk= m_Doc.DK_BriefSorda(0)
+            Set ndAks = class_db.Getdocumentbyunid(m_Doc.Parentdocumentunid)
+
+            logtext = CStr(Now()) & " ~ Brief sorumlusuna gönderildi ~ " & m_username
+            Call tarihceyeEkle(logtext, m_Doc)
+            
+            ' Yeni loglama mekanizmasý
+            strAction = "Brief sorumlusuna gönderildi"
+            Call TarihceOlustur(m_Doc, m_Doc.Form(0), m_Doc.Form(0), m_Doc.talepNo(0), m_Doc.FormNo(0), strAction, strAciklama)
+
+            Set kisi = New Calisan(StrLeft(m_Doc.BriefSorumlusu(0), "-"))
+            m_Doc.Email_BRIEF_SORUMLU = kisi.EMAIL
+
+            m_Doc.SendTo= m_Doc.Email_BRIEF_SORUMLU
+            
+            'mail \\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\            
+            strKonu = KampTuru + ndAks.talepNo(0)  + " iþlem no.lu "+ndAks.kampanyaAd(0)+ " adlý kampanya ile ilgili " + ndAks.aksiyonAd(0) + " isimli aksiyona ait brief düzenlenerek tekrar gönderilmiþtir."
+            strIcerik = KampTuru + ndAks.talepNo(0)  + " iþlem no.lu "+ndAks.kampanyaAd(0)+ " adlý kampanya ile ilgili " + ndAks.aksiyonAd(0) + " isimli aksiyona ait brief düzenlenerek tekrar gönderilmiþtir. <br /><br />"
+            strIcerik = strIcerik+ "Ýlgili aksiyona eriþim için " 
+            strIcerik= strIcerik+ {<a href="http://}+server.Common+".akbank.com.tr/"+m_Doc.DBPath(0)+"/0/"+ndAks.UniversalID+{?OpenDocument">} & "týklayýnýz." & {</a><br />} 
+            strIcerik = strIcerik+ "Ýlgili Brief Dokümanýna eriþim için "    
+            strIcerik= strIcerik+ {<a href="http://}+server.Common+".akbank.com.tr/"+m_Doc.DBPath(0)+"/0/"+m_Doc.UniversalID+{?OpenDocument">} & "týklayýnýz." & {</a><br /><br />} 
+            strIcerik = strIcerik+ "Bilgi ve deðerlendirmelerinize sunulur.<br />"       
+            'mail /////////////////////////////////////////////////////////////////
+
+            m_Doc.LastActionDate = Today
+                  
+            Call m_Doc.computeWithForm(True,False)
+                  
+            Call setDelegation("W", findYetkili())
+            
+            ' Ýade edilen brief tekrar gönderiliyorsa, brief sorumlusuna mail gönder
+            If isIade Then
+                  m_Doc.sendCc = ArrayAppend(m_Doc.getItemValue("sendCc"), getEmails(m_Doc.GetItemValue("DelegeAuthors")))
+                  Call MailGonder(m_Doc.curUserMail(0), m_Doc.SendTo, m_Doc.sendCc, strKonu,  strIcerik)
+                  m_Doc.sendCc = ""
+            End If
+            
+            Call altDokGuncelle(m_Doc.dk(0), logtext)
+            
+      exitsub:
+            Exit Sub    
+      ErrorHandler:
+            m_Doc.Action = "0"
+            m_Doc.Busy = "0"  
+            Call appLog.logError("LS:LsUygulamaAkis" , "UygulamaAkis - briefGonder", Err, Erl, Error$, PRIORITY_TYPE_YUKSEK, COPYTOGENERALLOGDB_HAYIR, COPYTOBO_HAYIR )
+            Exit Sub 
+      End Sub
+      
+%REM
+********
+Sub briefAjansaGonder()
+********
+%END REM
+      Sub briefAjansaGonder()
+            On Error GoTo ErrorHandler
+            Dim ndAks As NotesDocument
+            Dim nItem As NotesItem
+            Dim kisi
+            Dim sRevize As String
+            
+            m_Doc.dk= m_Doc.DK_Ajans(0)
+            Set ndAks = class_db.Getdocumentbyunid(m_Doc.Parentdocumentunid)
+            
+            If m_Doc.HasItem("KIBIade") Then
+                  If m_Doc.KIBIade(0) = "1" Then
+                        sRevize = "revize "
+                  End If
+            End If
+            logtext = CStr(Now()) & " ~ Brief ajansa " + sRevize + "geçildi ~ " & m_username
+            Call tarihceyeEkle(logtext, m_Doc)
+            
+            ' Yeni loglama mekanizmasý
+            strAction = "Brief ajansa " + sRevize + "geçildi"
+            Call TarihceOlustur(m_Doc, m_Doc.Form(0), m_Doc.Form(0), m_Doc.talepNo(0), m_Doc.FormNo(0), strAction, strAciklama)
+            
+            'mail \\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\            
+            m_Doc.sendCc = ""
+            
+            ' Formu doldurana
+            m_Doc.SendTo = m_Doc.GirisYapanMail
+            Set nItem = m_Doc.Getfirstitem("SendTo")
+            If m_Doc.SorumluSicil(0) <> "" Then
+                  Set kisi = New Calisan(m_Doc.sorumluSicil(0))
+                  Call nItem.Appendtotextlist(kisi.EMAIL)
+            End If
+            
+            ' KIB'e (Yeni HTML ise)
+            If m_Doc.emailHTMLTip(0) = "Yeni HTML" Then
+                  Call nItem.Appendtotextlist(setYetkiliMail("KIB"))
+            End If
+            
+            ' Kampanya Yöneticisine
+            Call nItem.Appendtotextlist(setYetkiliMail("KAMP_YONETICI"))
+            
+            ' Kampanya Sorumlusuna
+            Set kisi = New Calisan(StrLeft(ndAks.KampSorumlusu(0), "-"))
+            Call nItem.Appendtotextlist(kisi.EMAIL)
+            
+            m_Doc.SendTo = ArrayUnique(m_Doc.getItemValue("SendTo"))
+                        
+            strKonu = KampTuru + ndAks.talepNo(0)  + " iþlem no.lu "+ndAks.kampanyaAd(0)+ " adlý kampanya ile ilgili " + ndAks.aksiyonAd(0) + " isimli aksiyona ait brief ajansa " + sRevize + "geçilmiþtir."
+            strIcerik = KampTuru + ndAks.talepNo(0)  + " iþlem no.lu "+ndAks.kampanyaAd(0)+ " adlý kampanya ile ilgili " + ndAks.aksiyonAd(0) + " isimli aksiyona ait brief ajansa " + sRevize + "geçilmiþtir. <br /><br />"
+            strIcerik = strIcerik+ "Ýlgili aksiyona eriþim için " 
+            strIcerik= strIcerik+ {<a href="http://}+server.Common+".akbank.com.tr/"+m_Doc.DBPath(0)+"/0/"+ndAks.UniversalID+{?OpenDocument">} & "týklayýnýz." & {</a><br />} 
+            strIcerik = strIcerik+ "Ýlgili Brief Dokümanýna eriþim için "    
+            strIcerik= strIcerik+ {<a href="http://}+server.Common+".akbank.com.tr/"+m_Doc.DBPath(0)+"/0/"+m_Doc.UniversalID+{?OpenDocument">} & "týklayýnýz." & {</a><br /><br />} 
+            strIcerik = strIcerik+ "Bilgi ve deðerlendirmelerinize sunulur.<br />"       
+            'mail /////////////////////////////////////////////////////////////////
+
+            Call m_Doc.computeWithForm(True,False)
+            
+            Call setDelegation("W", findYetkili())
+            
+            m_Doc.sendCc = getEmails(m_Doc.GetItemValue("DelegeAuthors"))
+            Call MailGonder(m_Doc.curUserMail(0), m_Doc.SendTo, m_Doc.sendCc, strKonu,  strIcerik)
+            m_Doc.sendCc = ""
+            
+            Call altDokGuncelle(m_Doc.dk(0), logtext)
+            
+exitsub:
+            Exit Sub
+ErrorHandler:
+            m_Doc.Action = "0"
+            m_Doc.Busy = "0"  
+            Call appLog.logError("LS:LsUygulamaAkis" , "UygulamaAkis - briefAjansaGonder", Err, Erl, Error$, PRIORITY_TYPE_YUKSEK, COPYTOGENERALLOGDB_HAYIR, COPYTOBO_HAYIR )
+            Exit Sub 
+      End Sub
+      
+%REM
+********
+Sub briefKIBeGonder()
+********
+%END REM
+      Sub briefKIBeGonder()
+            On Error GoTo ErrorHandler
+            Dim ndAks As NotesDocument
+            
+            m_Doc.dk= m_Doc.DK_KIB(0)
+            Call m_Doc.RemoveItem("KIBIade")
+            Call m_Doc.RemoveItem("isbIade")
+            Set ndAks = class_db.Getdocumentbyunid(m_Doc.Parentdocumentunid)
+            
+            logtext = CStr(Now()) & " ~ KÝB görsel onayýna gönderildi ~ " & m_username
+            Call tarihceyeEkle(logtext, m_Doc)
+            
+            ' Yeni loglama mekanizmasý
+            strAction = "KÝB görsel onayýna gönderildi"
+            Call TarihceOlustur(m_Doc, m_Doc.Form(0), m_Doc.Form(0), m_Doc.talepNo(0), m_Doc.FormNo(0), strAction, strAciklama)
+            
+            ' Mail gönderilecek kiþiler
+            m_Doc.Email_KIB_SORUMLU = setYetkiliMail("KIB")
+            m_Doc.SendTo= m_Doc.Email_KIB_SORUMLU
+
+            'mail \\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\            
+            m_Doc.sendCc = ""
+            
+            strKonu = KampTuru + ndAks.talepNo(0)  + " iþlem no.lu "+ndAks.kampanyaAd(0)+ " adlý kampanya ile ilgili " + ndAks.aksiyonAd(0) + " isimli aksiyona ait görsel onayýnýza gönderilmiþtir."
+            strIcerik = KampTuru + ndAks.talepNo(0)  + " iþlem no.lu "+ndAks.kampanyaAd(0)+ " adlý kampanya ile ilgili " + ndAks.aksiyonAd(0) + " isimli aksiyona ait görsel onayýnýza gönderilmiþtir. <br /><br />"
+            strIcerik = strIcerik+ "Ýlgili aksiyona eriþim için " 
+            strIcerik= strIcerik+ {<a href="http://}+server.Common+".akbank.com.tr/"+m_Doc.DBPath(0)+"/0/"+ndAks.UniversalID+{?OpenDocument">} & "týklayýnýz." & {</a><br />} 
+            strIcerik = strIcerik+ "Ýlgili Brief Dokümanýna eriþim için "    
+            strIcerik= strIcerik+ {<a href="http://}+server.Common+".akbank.com.tr/"+m_Doc.DBPath(0)+"/0/"+m_Doc.UniversalID+{?OpenDocument">} & "týklayýnýz." & {</a><br /><br />}
+            If class_genPar.HasItem("KIBGorselOnaySure") Then
+                  strIcerik = strIcerik+ CStr(class_genPar.KIBGorselOnaySure(0)) + " iþ günü içerisinde onayýnýz beklenmektedir.<br /><br />"
+            End If            
+            strIcerik = strIcerik+ "Bilgi ve deðerlendirmelerinize sunulur.<br />"       
+            'mail /////////////////////////////////////////////////////////////////
+
+            m_Doc.LastActionDate = Today
+            
+            Call m_Doc.computeWithForm(True,False)
+            
+            Call setDelegation("W", findYetkili())
+            
+            m_Doc.sendCc = getEmails(m_Doc.GetItemValue("DelegeAuthors"))
+            Call MailGonder(m_Doc.curUserMail(0), m_Doc.SendTo, m_Doc.sendCc, strKonu,  strIcerik)
+            m_Doc.sendCc = ""
+            
+            Call altDokGuncelle(m_Doc.dk(0), logtext)
+            
+exitsub:
+            Exit Sub
+ErrorHandler:
+            m_Doc.Action = "0"
+            m_Doc.Busy = "0"  
+            Call appLog.logError("LS:LsUygulamaAkis" , "UygulamaAkis - briefKIBeGonder", Err, Erl, Error$, PRIORITY_TYPE_YUKSEK, COPYTOGENERALLOGDB_HAYIR, COPYTOBO_HAYIR )
+            Exit Sub 
+      End Sub
+      
+%REM
+********
+Sub briefKIBOnay()
+********
+%END REM
+      Sub briefKIBOnay()
+            On Error GoTo ErrorHandler
+            Dim ndAks As NotesDocument
+            Dim kisi
+            Dim nItem As NotesItem
+            
+            m_Doc.dk= m_Doc.DK_Isbirimi(0)
+            Call m_Doc.RemoveItem("isbIade")
+            Set ndAks = class_db.Getdocumentbyunid(m_Doc.Parentdocumentunid)
+            
+            logtext = CStr(Now()) & " ~ Ýþ Birimi görsel onayýna gönderildi ~ " & m_username
+            Call tarihceyeEkle(logtext, m_Doc)
+            
+            ' Yeni loglama mekanizmasý
+            strAction = "Ýþ Birimi görsel onayýna gönderildi"
+            Call TarihceOlustur(m_Doc, m_Doc.Form(0), m_Doc.Form(0), m_Doc.talepNo(0), m_Doc.FormNo(0), strAction, strAciklama)
+            
+            ' Mail gönderilecek kiþiler
+            m_Doc.SendTo = m_Doc.GirisYapanMail
+            Set nItem = m_Doc.Getfirstitem("SendTo")
+            If m_Doc.SorumluSicil(0) <> "" Then
+                  Set kisi = New Calisan(m_Doc.sorumluSicil(0))
+                  Call nItem.Appendtotextlist(kisi.EMAIL)
+            End If
+            m_Doc.SendTo = ArrayUnique(m_Doc.getItemValue("SendTo"))
+            
+            'mail \\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\            
+            m_Doc.sendCc = ""
+            
+            strKonu = KampTuru + ndAks.talepNo(0)  + " iþlem no.lu "+ndAks.kampanyaAd(0)+ " adlý kampanya ile ilgili " + ndAks.aksiyonAd(0) + " isimli aksiyona ait görsel onayýnýza gönderilmiþtir."
+            strIcerik = KampTuru + ndAks.talepNo(0)  + " iþlem no.lu "+ndAks.kampanyaAd(0)+ " adlý kampanya ile ilgili " + ndAks.aksiyonAd(0) + " isimli aksiyona ait görsel onayýnýza gönderilmiþtir. <br /><br />"
+            strIcerik = strIcerik+ "Ýlgili aksiyona eriþim için " 
+            strIcerik= strIcerik+ {<a href="http://}+server.Common+".akbank.com.tr/"+m_Doc.DBPath(0)+"/0/"+ndAks.UniversalID+{?OpenDocument">} & "týklayýnýz." & {</a><br />} 
+            strIcerik = strIcerik+ "Ýlgili Brief Dokümanýna eriþim için "    
+            strIcerik= strIcerik+ {<a href="http://}+server.Common+".akbank.com.tr/"+m_Doc.DBPath(0)+"/0/"+m_Doc.UniversalID+{?OpenDocument">} & "týklayýnýz." & {</a><br /><br />}
+            If class_genPar.HasItem("IsbGorselOnaySure") Then
+                  strIcerik = strIcerik+ CStr(class_genPar.IsbGorselOnaySure(0)) + " iþ günü içerisinde onayýnýz beklenmektedir.<br /><br />"
+            End If            
+            strIcerik = strIcerik+ "Bilgi ve deðerlendirmelerinize sunulur.<br />"       
+            'mail /////////////////////////////////////////////////////////////////
+
+            m_Doc.LastActionDate = Today
+            
+            Call m_Doc.computeWithForm(True,False)
+            
+            Call setDelegation("W", findYetkili())
+            
+            m_Doc.sendCc = getEmails(m_Doc.GetItemValue("DelegeAuthors"))
+            Call MailGonder(m_Doc.curUserMail(0), m_Doc.SendTo, m_Doc.sendCc, strKonu,  strIcerik)
+            m_Doc.sendCc = ""
+            
+            Call altDokGuncelle(m_Doc.dk(0), logtext)
+            
+exitsub:
+            Exit Sub
+ErrorHandler:
+            m_Doc.Action = "0"
+            m_Doc.Busy = "0"  
+            Call appLog.logError("LS:LsUygulamaAkis" , "UygulamaAkis - briefKIBOnay", Err, Erl, Error$, PRIORITY_TYPE_YUKSEK, COPYTOGENERALLOGDB_HAYIR, COPYTOBO_HAYIR )
+            Exit Sub 
+      End Sub
+      
+%REM
+********
+Sub briefIsbOnay()
+********
+%END REM
+      Sub briefIsbOnay()
+            On Error GoTo ErrorHandler
+            Dim ndAks As NotesDocument
+            Dim kisi
+            Dim nItem As NotesItem
+            
+            m_Doc.dk= m_Doc.DK_HTMLBriefSor(0)
+            Set ndAks = class_db.Getdocumentbyunid(m_Doc.Parentdocumentunid)
+            
+            logtext = CStr(Now()) & " ~ HTML için Brief Sorumlusuna gönderildi ~ " & m_username
+            Call tarihceyeEkle(logtext, m_Doc)
+            
+            ' Yeni loglama mekanizmasý
+            strAction = "HTML için Brief Sorumlusuna gönderildi"
+            Call TarihceOlustur(m_Doc, m_Doc.Form(0), m_Doc.Form(0), m_Doc.talepNo(0), m_Doc.FormNo(0), strAction, strAciklama)
+            
+            ' Mail gönderilecek kiþiler
+            Set kisi = New Calisan(StrLeft(m_Doc.BriefSorumlusu(0), "-"))
+            m_Doc.Email_BRIEF_SORUMLU = kisi.EMAIL
+            m_Doc.SendTo= m_Doc.Email_BRIEF_SORUMLU
+                        
+            'mail \\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\            
+            m_Doc.Email_KIB_SORUMLU = setYetkiliMail("KIB")
+            m_Doc.sendCc = m_Doc.Email_KIB_SORUMLU
+            
+            strKonu = KampTuru + ndAks.talepNo(0)  + " iþlem no.lu "+ndAks.kampanyaAd(0)+ " adlý kampanya ile ilgili " + ndAks.aksiyonAd(0) + " isimli aksiyona ait görsel onaylanmýþ; HTML’e dönüþüm için süreç baþlatýlmýþtýr."
+            strIcerik = KampTuru + ndAks.talepNo(0)  + " iþlem no.lu "+ndAks.kampanyaAd(0)+ " adlý kampanya ile ilgili " + ndAks.aksiyonAd(0) + " isimli aksiyona ait görsel onaylanmýþ; HTML’e dönüþüm için süreç baþlatýlmýþtýr. <br /><br />"
+            strIcerik = strIcerik+ "Ýlgili aksiyona eriþim için " 
+            strIcerik= strIcerik+ {<a href="http://}+server.Common+".akbank.com.tr/"+m_Doc.DBPath(0)+"/0/"+ndAks.UniversalID+{?OpenDocument">} & "týklayýnýz." & {</a><br />} 
+            strIcerik = strIcerik+ "Ýlgili Brief Dokümanýna eriþim için "    
+            strIcerik= strIcerik+ {<a href="http://}+server.Common+".akbank.com.tr/"+m_Doc.DBPath(0)+"/0/"+m_Doc.UniversalID+{?OpenDocument">} & "týklayýnýz." & {</a><br /><br />}
+            If class_genPar.HasItem("AjansHTMLSure") Then
+                  strIcerik = strIcerik+ CStr(class_genPar.AjansHTMLSure(0)) + " iþ günü içerisinde HTML'e dönüþümün tamamlanmasý gerekmektedir.<br /><br />"
+            End If            
+            strIcerik = strIcerik+ "Bilgi ve deðerlendirmelerinize sunulur.<br />"       
+            'mail /////////////////////////////////////////////////////////////////
+
+            m_Doc.LastActionDate = Today
+            
+            Call m_Doc.computeWithForm(True,False)
+            
+            Call setDelegation("W", findYetkili())
+            
+            m_Doc.sendCc = ArrayAppend(m_Doc.getItemValue("sendCc"), getEmails(m_Doc.GetItemValue("DelegeAuthors")))
+            Call MailGonder(m_Doc.curUserMail(0), m_Doc.SendTo, m_Doc.sendCc, strKonu,  strIcerik)
+            m_Doc.sendCc = ""
+            
+            Call altDokGuncelle(m_Doc.dk(0), logtext)
+            
+exitsub:
+            Exit Sub
+ErrorHandler:
+            m_Doc.Action = "0"
+            m_Doc.Busy = "0"  
+            Call appLog.logError("LS:LsUygulamaAkis" , "UygulamaAkis - briefIsbOnay", Err, Erl, Error$, PRIORITY_TYPE_YUKSEK, COPYTOGENERALLOGDB_HAYIR, COPYTOBO_HAYIR )
+            Exit Sub 
+      End Sub
+      
+%REM
+********
+Sub briefTamamla()
+********
+%END REM
+      Sub briefTamamla()
+            On Error GoTo ErrorHandler
+            Dim ndAks As NotesDocument
+            Dim kisi
+            Dim nItem As NotesItem
+            
+            m_Doc.dk= m_Doc.DK_Tamam(0)
+            Set ndAks = class_db.Getdocumentbyunid(m_Doc.Parentdocumentunid)
+            
+            logtext = CStr(Now()) & " ~ Tamamlandý ~ " & m_username
+            Call tarihceyeEkle(logtext, m_Doc)
+            
+            ' Yeni loglama mekanizmasý
+            strAction = "Tamamlandý"
+            Call TarihceOlustur(m_Doc, m_Doc.Form(0), m_Doc.Form(0), m_Doc.talepNo(0), m_Doc.FormNo(0), strAction, strAciklama)
+            
+            ' Formu doldurana
+            m_Doc.SendTo = m_Doc.GirisYapanMail
+            Set nItem = m_Doc.Getfirstitem("SendTo")
+            If m_Doc.SorumluSicil(0) <> "" Then
+                  Set kisi = New Calisan(m_Doc.sorumluSicil(0))
+                  Call nItem.Appendtotextlist(kisi.EMAIL)
+            End If
+
+            ' Kampanya Yöneticisine
+            Call nItem.Appendtotextlist(setYetkiliMail("KAMP_YONETICI"))
+            
+            ' Kampanya Sorumlusuna
+            Set kisi = New Calisan(StrLeft(ndAks.KampSorumlusu(0), "-"))
+            Call nItem.Appendtotextlist(kisi.EMAIL)
+            
+            m_Doc.SendTo = ArrayUnique(m_Doc.getItemValue("SendTo"))
+            
+            'mail \\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\            
+            m_Doc.sendCc = ""
+            
+            strKonu = KampTuru + ndAks.talepNo(0)  + " iþlem no.lu "+ndAks.kampanyaAd(0)+ " adlý kampanya ile ilgili " + ndAks.aksiyonAd(0) + " isimli aksiyona ait onaylanmýþ görsel; HTML formatýna getirilmiþtir."
+            strIcerik = KampTuru + ndAks.talepNo(0)  + " iþlem no.lu "+ndAks.kampanyaAd(0)+ " adlý kampanya ile ilgili " + ndAks.aksiyonAd(0) + " isimli aksiyona ait onaylanmýþ görsel; HTML formatýna getirilmiþtir. <br /><br />"
+            strIcerik = strIcerik+ "Ýlgili aksiyona eriþim için " 
+            strIcerik= strIcerik+ {<a href="http://}+server.Common+".akbank.com.tr/"+m_Doc.DBPath(0)+"/0/"+ndAks.UniversalID+{?OpenDocument">} & "týklayýnýz." & {</a><br />} 
+            strIcerik = strIcerik+ "Ýlgili Brief Dokümanýna eriþim için "    
+            strIcerik= strIcerik+ {<a href="http://}+server.Common+".akbank.com.tr/"+m_Doc.DBPath(0)+"/0/"+m_Doc.UniversalID+{?OpenDocument">} & "týklayýnýz." & {</a><br /><br />}
+            strIcerik = strIcerik+ "Bilgi ve deðerlendirmelerinize sunulur.<br />"       
+            'mail /////////////////////////////////////////////////////////////////
+
+            m_Doc.LastActionDate = Today
+            
+            Call m_Doc.computeWithForm(True,False)
+            
+            Call setDelegation("W", findYetkili())
+            
+            m_Doc.sendCc = getEmails(m_Doc.GetItemValue("DelegeAuthors"))
+            Call MailGonder(m_Doc.curUserMail(0), m_Doc.SendTo, m_Doc.sendCc, strKonu,  strIcerik)
+            m_Doc.sendCc = ""
+            
+            Call altDokGuncelle(m_Doc.dk(0), logtext)
+            
+exitsub:
+            Exit Sub
+ErrorHandler:
+            m_Doc.Action = "0"
+            m_Doc.Busy = "0"  
+            Call appLog.logError("LS:LsUygulamaAkis" , "UygulamaAkis - briefTamamla", Err, Erl, Error$, PRIORITY_TYPE_YUKSEK, COPYTOGENERALLOGDB_HAYIR, COPYTOBO_HAYIR )
+            Exit Sub 
+      End Sub
+      
+      %REM
+********
+Sub briefIade(sIadeEdilen)
+********
+      %END REM
+      Sub briefIade(sIadeEdilen As String)
+            On Error GoTo ErrorHandler
+            Dim ndAks As NotesDocument
+            Dim kisi
+            Dim nItem As NotesItem
+            
+            Set ndAks = class_db.Getdocumentbyunid(m_Doc.Parentdocumentunid)
+                  
+            If m_Doc.IadeAciklama(0) = "" Then
+                  logtext = CStr(Now()) & " ~ Ýade edildi ~ " & m_username
+            Else
+                  logtext = CStr(Now()) & " ~ Ýade edildi ~ Açýklama ~ " & m_Doc.IadeAciklama(0) & " ~ "  & m_username
+            End If
+            
+            ' Yeni loglama mekanizmasý
+            strAction = "Ýade edildi"
+            strAciklama = m_Doc.IadeAciklama(0)
+
+            If sIadeEdilen = "BriefSor" Then
+                  m_Doc.dk= m_Doc.DK_BriefSorda(0)
+                  m_Doc.KIBIade = "1"
+                  m_Doc.KIBIadePersist = "1"
+                  
+                  ' Mail gönderilecek kiþiler
+                  Set kisi = New Calisan(StrLeft(m_Doc.BriefSorumlusu(0), "-"))
+                  m_Doc.Email_BRIEF_SORUMLU = kisi.EMAIL
+                  m_Doc.SendTo= m_Doc.Email_BRIEF_SORUMLU
+                  
+                  'mail \\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\            
+                  m_Doc.sendCc = ""
+                  
+                  strKonu = KampTuru + ndAks.talepNo(0)  + " iþlem no.lu "+ndAks.kampanyaAd(0)+ " adlý kampanya ile ilgili " + ndAks.aksiyonAd(0) + " isimli aksiyona ait görsel iade edilmiþtir."
+                  strIcerik = KampTuru + ndAks.talepNo(0)  + " iþlem no.lu "+ndAks.kampanyaAd(0)+ " adlý kampanya ile ilgili " + ndAks.aksiyonAd(0) + " isimli aksiyona ait görsel(ler) uygun görülmemiþ ve form yeni görsel hazýrlanmasý için iade edilmiþtir. <br /><br />"
+                  strIcerik = strIcerik+ "Ýlgili aksiyona eriþim için " 
+                  strIcerik= strIcerik+ {<a href="http://}+server.Common+".akbank.com.tr/"+m_Doc.DBPath(0)+"/0/"+ndAks.UniversalID+{?OpenDocument">} & "týklayýnýz." & {</a><br />}
+                  strIcerik = strIcerik+ "Ýlgili Brief Dokümanýna eriþim için "    
+                  strIcerik= strIcerik+ {<a href="http://}+server.Common+".akbank.com.tr/"+m_Doc.DBPath(0)+"/0/"+m_Doc.UniversalID+{?OpenDocument">} & "týklayýnýz." & {</a><br /><br />}
+                  If class_genPar.HasItem("BriefSorAjansRevizeSure") Then
+                        strIcerik = strIcerik+ CStr(class_genPar.BriefSorAjansRevizeSure(0)) + " iþ günü içerisinde revize görsellerin hazýrlanmasý gerekmektedir.<br /><br />"
+                  End If            
+                  strIcerik = strIcerik+ "Ýade Açýklamasý : " + strAciklama + "<br /><br />"         
+                  strIcerik = strIcerik+ "Bilgi ve deðerlendirmelerinize sunulur.<br />"       
+                  'mail /////////////////////////////////////////////////////////////////
+            ElseIf sIadeEdilen = "KIB" Then
+                  m_Doc.dk= m_Doc.DK_KIB(0)
+                  m_Doc.isbIade = "1"
+                  m_Doc.isbIadePersist = "1"
+                  
+                  ' Mail gönderilecek kiþiler
+                  m_Doc.Email_KIB_SORUMLU = setYetkiliMail("KIB")
+                  m_Doc.SendTo= m_Doc.Email_KIB_SORUMLU
+
+                  'mail \\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\            
+                  m_Doc.sendCc = ""
+                  
+                  strKonu = KampTuru + ndAks.talepNo(0)  + " iþlem no.lu "+ndAks.kampanyaAd(0)+ " adlý kampanya ile ilgili " + ndAks.aksiyonAd(0) + " isimli aksiyona ait görsel iade edilmiþtir."
+                  strIcerik = KampTuru + ndAks.talepNo(0)  + " iþlem no.lu "+ndAks.kampanyaAd(0)+ " adlý kampanya ile ilgili " + ndAks.aksiyonAd(0) + " isimli aksiyona ait görsel(ler) uygun görülmemiþ, form tekrar deðerlendirilmesi ve gerekli ise yeni görsel hazýrlanmasý için iade edilmiþtir. <br /><br />"
+                  strIcerik = strIcerik+ "Ýlgili aksiyona eriþim için " 
+                  strIcerik= strIcerik+ {<a href="http://}+server.Common+".akbank.com.tr/"+m_Doc.DBPath(0)+"/0/"+ndAks.UniversalID+{?OpenDocument">} & "týklayýnýz." & {</a><br />} 
+                  strIcerik = strIcerik+ "Ýlgili Brief Dokümanýna eriþim için "    
+                  strIcerik= strIcerik+ {<a href="http://}+server.Common+".akbank.com.tr/"+m_Doc.DBPath(0)+"/0/"+m_Doc.UniversalID+{?OpenDocument">} & "týklayýnýz." & {</a><br /><br />}
+                  strIcerik = strIcerik+ "Ýade Açýklamasý : " + strAciklama + "<br /><br />"         
+                  strIcerik = strIcerik+ "Bilgi ve deðerlendirmelerinize sunulur.<br />"       
+                  'mail /////////////////////////////////////////////////////////////////
+            ElseIf sIadeEdilen = "GirisYapan" Then
+                  m_Doc.dk= m_Doc.DK_Iade(0)
+                  ' m_Doc.isbIade = "1"
+                  ' m_Doc.isbIadePersist = "1"
+                  
+                  ' Mail gönderilecek kiþiler
+                  m_Doc.SendTo = m_Doc.GirisYapanMail
+                  Set nItem = m_Doc.Getfirstitem("SendTo")
+                  If m_Doc.SorumluSicil(0) <> "" Then
+                        Set kisi = New Calisan(m_Doc.sorumluSicil(0))
+                        Call nItem.Appendtotextlist(kisi.EMAIL)
+                  End If
+                                   
+                  'mail \\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\            
+                  Set kisi = New Calisan(m_Doc.sorumluYonSicil(0))
+                  m_Doc.sendCc = kisi.EMAIL
+                  
+                  strKonu = KampTuru + ndAks.talepNo(0)  + " iþlem no.lu "+ndAks.kampanyaAd(0)+ " adlý kampanya ile ilgili " + ndAks.aksiyonAd(0) + " isimli aksiyona ait brief iade edilmiþtir."
+                  strIcerik = KampTuru + ndAks.talepNo(0)  + " iþlem no.lu "+ndAks.kampanyaAd(0)+ " adlý kampanya ile ilgili " + ndAks.aksiyonAd(0) + " isimli aksiyona ait brief iade edilmiþtir. <br /><br />"
+                  strIcerik = strIcerik+ "Ýlgili aksiyona eriþim için " 
+                  strIcerik= strIcerik+ {<a href="http://}+server.Common+".akbank.com.tr/"+m_Doc.DBPath(0)+"/0/"+ndAks.UniversalID+{?OpenDocument">} & "týklayýnýz." & {</a><br />} 
+                  strIcerik = strIcerik+ "Ýlgili Brief Dokümanýna eriþim için "    
+                  strIcerik= strIcerik+ {<a href="http://}+server.Common+".akbank.com.tr/"+m_Doc.DBPath(0)+"/0/"+m_Doc.UniversalID+{?OpenDocument">} & "týklayýnýz." & {</a><br /><br />}
+                  strIcerik = strIcerik+ "Ýade Açýklamasý : " + strAciklama + "<br /><br />"         
+                  strIcerik = strIcerik+ "Bilgi ve deðerlendirmelerinize sunulur.<br />"       
+                  'mail /////////////////////////////////////////////////////////////////
+            Else
+                  Error 10001, "Belirtilen iade tipi olmasý gerekenler içinde bulunmamaktadýr : " + sIadeEdilen
+            End If            
+
+            Call tarihceyeEkle(logtext, m_Doc)
+            
+            ' Yeni loglama mekanizmasý
+            Call TarihceOlustur(m_Doc, m_Doc.Form(0), m_Doc.Form(0), m_Doc.talepNo(0), m_Doc.FormNo(0), strAction, strAciklama)
+            
+            m_Doc.LastActionDate = Today
+            
+            Call m_Doc.computeWithForm(True,False)
+            
+            Call setDelegation("W", findYetkili())
+            
+            m_Doc.sendCc = ArrayAppend(m_Doc.getItemValue("sendCc"), getEmails(m_Doc.GetItemValue("DelegeAuthors")))
+            Call MailGonder(m_Doc.curUserMail(0), m_Doc.SendTo, m_Doc.sendCc, strKonu,  strIcerik)
+            m_Doc.sendCc = ""
+            
+            Call altDokGuncelle(m_Doc.dk(0), logtext)
+            
+exitsub:
+            Exit Sub
+ErrorHandler:
+            m_Doc.Action = "0"
+            m_Doc.Busy = "0"  
+            Call appLog.logError("LS:LsUygulamaAkis" , "UygulamaAkis - briefIade(" + sIadeEdilen + ")", Err, Erl, Error$, PRIORITY_TYPE_YUKSEK, COPYTOGENERALLOGDB_HAYIR, COPYTOBO_HAYIR )
+            Exit Sub 
+      End Sub
+
+      %REM
+********
+Sub briefIptal()
+********
+      %END REM    
+      Sub briefIptal()
+            On Error GoTo ErrorHandler
+            
+            Dim item As NotesItem
+            
+            ReDim docYazma(0) As String  
+            docYazma(0) = "Hickimse"
+            Call setYazmaYetkisi(docYazma())
+            
+            logtext = CStr(Now()) & " ~ Doküman Ýptal Edildi ~ " & m_username
+            Call tarihceyeEkle(logtext, m_Doc)
+            
+            ' Yeni loglama mekanizmasý
+            strAction = "Ýptal edildi"
+            strAciklama = "Aksiyonun iptal edilmesi sebebiyle Brief süreci de iptal edilmiþtir!"
+            Call TarihceOlustur(m_Doc, m_Doc.Form(0), m_Doc.Form(0), m_Doc.talepNo(0), m_Doc.FormNo(0), strAction, strAciklama)
+            
+            m_Doc.dk = m_Doc.dk_Iptal(0)
+
+            m_Doc.Email_KIB_SORUMLU = setYetkiliMail("KIB")
+            m_Doc.SendTo= m_Doc.Email_KIB_SORUMLU
+            Set item = m_doc.Getfirstitem("SendTo")
+            If m_doc.HasItem("Email_BRIEF_SORUMLU") Then
+                  If m_doc.Email_BRIEF_SORUMLU(0) <> "" Then
+                        Call item.Appendtotextlist(m_doc.Email_BRIEF_SORUMLU(0))
+                  End If
+            End If
+            
+            m_Doc.sendCc = ""
+            
+            'mail \\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\            
+            strKonu = KampTuru + m_Doc.talepNo(0)  + " iþlem no.lu "+m_Doc.kampanyaAd(0)+ " adlý kampanya ile ilgili " + m_Doc.aksiyonAd(0) + " isimli aksiyon iptal edildiði için, ona baðlý brief de iptal edilmiþtir"
+            'Till Here
+            strIcerik = m_Doc.talepNo(0) + " iþlem no.lu "+m_Doc.kampanyaAd(0)+ " adlý kampanyaya ait " + CStr(m_Doc.baslangicTarihi(0))+" tarihinde iþleme alýnmasý gereken " + m_Doc.aksiyonAd(0) + " isimli aksiyon iptal edildiði için ona baðlý brief de iptal edilmiþtir. <br />"
+            strIcerik = strIcerik+ "Ýlgili brief'e eriþim için " 
+            strIcerik= strIcerik+ {<a href="http://}+server.Common+".akbank.com.tr/"+m_Doc.DBPath(0)+"/0/"+m_Doc.UniversalID+{?OpenDocument">} & "týklayýnýz." & {</a><br />} 
+            strIcerik = strIcerik+ "Bilgi ve deðerlendirmelerinize sunulur.<br />"       
+            
+            Call MailGonder(m_Doc.curUserMail(0), m_Doc.SendTo, m_Doc.sendCc, strKonu,  strIcerik)
+            'mail /////////////////////////////////////////////////////////////////
+            
+            Call m_Doc.ComputeWithForm(False, False)
+            
+            Call altDokGuncelle(m_Doc.dk(0), logtext)
+            
+exitsub:
+            Exit Sub
+ErrorHandler:
+            m_Doc.Action = "0"
+            m_Doc.Busy = "0"  
+            Call appLog.logError("LS:LsUygulamaAkis" , "UygulamaAkis - briefIptal", Err, Erl, Error$, PRIORITY_TYPE_YUKSEK, COPYTOGENERALLOGDB_HAYIR, COPYTOBO_HAYIR )
+            Exit Sub 
+      End Sub
+      
+%REM
+********
+Sub KampYonSonOnay()
+********
+%END REM
+      Sub KampYonSonOnay()
+            On Error Goto ErrorHandler
+            Dim kisi
+            
+            logtext = Cstr(Now()) & " ~ Aksiyon tamamlanmak üzere Kampanya Sorumlusuna gönderildi ~ " & m_username
+            Call tarihceyeEkle(logtext, m_Doc)
+            
+            ' Yeni loglama mekanizmasý
+            strAction = "Aksiyon tamamlanmak üzere Kampanya Sorumlusuna gönderildi"
+            Call TarihceOlustur(m_Doc, m_Doc.Form(0), m_Doc.Form(0), m_Doc.talepNo(0), m_Doc.FormNo(0), strAction, strAciklama)
+            
+            m_Doc.dk= m_Doc.DK_KampSorSonOnay(0)
+            Set kisi = New Calisan(Strleft(m_Doc.KampSorumlusu(0), "-"))
+            m_Doc.Email_KAMP_SORUMLU = kisi.EMAIL
+            m_Doc.SendTo= m_Doc.Email_KAMP_SORUMLU(0)
+            
+            'mail \\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\            
+            m_Doc.sendCc = "" 
+            
+            ' Added by Shalini on 20-Jan for TLP-2011-6712 to add kampanyaTuru at the beginning of the subject incase of "frmKampAks" form
+            If m_Doc.Form(0)="frmKampAks" Then
+                  strKonu = KampTuru + m_Doc.talepNo(0)  + " iþlem no.lu "+m_Doc.kampanyaAd(0)+ " adlý kampanya ile ilgili " + m_Doc.aksiyonAd(0) + " isimli aksiyon tamamlanmak üzere onayýnýza gönderilmiþtir"
+            Else
+                  strKonu = KampTuru + m_Doc.talepNo(0)  + " iþlem no.lu "+m_Doc.kampanyaAd(0)+ " adlý kampanya ile ilgili " + m_Doc.aksiyonAd(0) + " isimli aksiyon tamamlanmak üzere onayýnýza gönderilmiþtir"
+            End If
+            'Till Here
+            
+            strIcerik = m_Doc.talepNo(0) + " iþlem no.lu "+m_Doc.kampanyaAd(0)+ " adlý kampanyaya ait " + Cstr(m_Doc.baslangicTarihi(0))+" tarihinde iþleme alýnmasý gereken " + m_Doc.aksiyonAd(0) + " isimli aksiyon tamamlanmak üzere onayýnýza gönderilmiþtir. <br />"
+            strIcerik = strIcerik+ "Ýlgili aksiyona eriþim için " 
+            strIcerik= strIcerik+ {<a href="http://}+server.Common+".akbank.com.tr/"+m_Doc.DBPath(0)+"/0/"+m_Doc.UniversalID+{?OpenDocument">} & "týklayýnýz." & {</a><br />} 
+            strIcerik = strIcerik+ "Bilgi ve deðerlendirmelerinize sunulur.<br />"       
+            'mail /////////////////////////////////////////////////////////////////
+            
+            Call m_Doc.computeWithForm(True,False)
+            Call setDelegation("W", findYetkili())
+            
+            m_Doc.sendCc = getEmails(m_Doc.GetItemValue("DelegeAuthors"))
+            Call MailGonder(m_Doc.curUserMail(0), m_Doc.SendTo, m_Doc.sendCc, strKonu,  strIcerik)
+            m_Doc.sendCc = ""
+            
+            doTeklifBackup = True
+            Call altDokGuncelle(m_Doc.dk(0), logtext)
+exitsub:
+            Exit Sub    
+ErrorHandler:
+            m_Doc.Action = "0"
+            m_Doc.Busy = "0"  
+            Call appLog.logError("LS:LsUygulamaAkis" , "UygulamaAkis - KampYonSonOnay", Err, Erl, Error$, PRIORITY_TYPE_YUKSEK, COPYTOGENERALLOGDB_HAYIR, COPYTOBO_HAYIR )
+            Exit Sub 
+      End Sub
+      
+%REM
+********
+Sub CRMMudurOnay()
+********
+%END REM
+      Sub CRMMudurOnay()
+            On Error Goto ErrorHandler
+            Dim kisi
+            
+            logtext = Cstr(Now()) & " ~ CRM Müdür uygunluk onayý verildi ~ " & m_username
+            Call tarihceyeEkle(logtext, m_Doc)
+            
+            ' Yeni loglama mekanizmasý
+            strAction = "CRM Müdür uygunluk onayý verildi"
+            Call TarihceOlustur(m_Doc, m_Doc.Form(0), m_Doc.Form(0), m_Doc.talepNo(0), m_Doc.FormNo(0), strAction, strAciklama)
+            
+            m_Doc.dk= m_Doc.DK_KampYonSonOnay(0)
+            ' Burada mail gonderilecek kiþi sadece seçili sorumlu olmalý
+            m_Doc.Email_KAMP_YONETICI = setYetkiliMail("KAMP_YONETICI")
+            m_Doc.SendTo= m_Doc.Email_KAMP_YONETICI
+            
+            m_Doc.sonYetkili= ""
+            m_Doc.sonYetkiliOnay= "CRMMudur"
+            
+            'mail \\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\            
+            m_Doc.sendCc = "" 
+            
+            ' Added by Shalini on 20-Jan for TLP-2011-6712 to add kampanyaTuru at the beginning of the subject incase of "frmKampAks" form
+            If m_Doc.Form(0)="frmKampAks" Then
+                  strKonu = KampTuru + m_Doc.talepNo(0)  + " iþlem no.lu "+m_Doc.kampanyaAd(0)+ " adlý kampanya ile ilgili " + m_Doc.aksiyonAd(0) + " isimli aksiyon için CRM Müdür uygunluk onayý verilmiþtir"   
+            Else
+                  strKonu = KampTuru + m_Doc.talepNo(0)  + " iþlem no.lu "+m_Doc.kampanyaAd(0)+ " adlý kampanya ile ilgili " + m_Doc.aksiyonAd(0) + " isimli aksiyon için CRM Müdür uygunluk onayý verilmiþtir"
+            End If
+            'Till Here
+            
+            strIcerik = m_Doc.talepNo(0) + " iþlem no.lu "+m_Doc.kampanyaAd(0)+ " adlý kampanyaya ait " + Cstr(m_Doc.baslangicTarihi(0))+" tarihinde iþleme alýnmasý gereken " + m_Doc.aksiyonAd(0) + " isimli aksiyon için CRM Müdür uygunluk onayý verilmiþtir. <br />"
+            strIcerik = strIcerik+ "Ýlgili aksiyona eriþim için " 
+            strIcerik= strIcerik+ {<a href="http://}+server.Common+".akbank.com.tr/"+m_Doc.DBPath(0)+"/0/"+m_Doc.UniversalID+{?OpenDocument">} & "týklayýnýz." & {</a><br />} 
+            strIcerik = strIcerik+ "Bilgi ve deðerlendirmelerinize sunulur.<br />"       
+            'mail /////////////////////////////////////////////////////////////////
+            
+            Call m_Doc.computeWithForm(True,False)
+            Call setDelegation("W", findYetkili())
+            
+            m_Doc.sendCc = getEmails(m_Doc.GetItemValue("DelegeAuthors"))
+            Call MailGonder(m_Doc.curUserMail(0), m_Doc.SendTo, m_Doc.sendCc, strKonu,  strIcerik)
+            m_Doc.sendCc = ""
+            
+            Call altDokGuncelle(m_Doc.dk(0), logtext)
+exitsub:
+            Exit Sub    
+ErrorHandler:
+            m_Doc.Action = "0"
+            m_Doc.Busy = "0"  
+            Call appLog.logError("LS:LsUygulamaAkis" , "UygulamaAkis - CRMMudurOnay", Err, Erl, Error$, PRIORITY_TYPE_YUKSEK, COPYTOGENERALLOGDB_HAYIR, COPYTOBO_HAYIR )
+            Exit Sub 
+      End Sub
+      
+%REM
+********
+Sub CRMBBOnay()
+********
+%END REM
+      Sub CRMBBOnay()
+            On Error Goto ErrorHandler
+            Dim kisi
+            
+            logtext = Cstr(Now()) & " ~ CRM Bölüm Baþkaný uygunluk onayý verildi ~ " & m_username
+            
+            m_Doc.dk= m_Doc.DK_KampYonSonOnay(0)
+            ' Burada mail gonderilecek kiþi sadece seçili sorumlu olmalý
+            m_Doc.Email_KAMP_YONETICI = setYetkiliMail("KAMP_YONETICI")
+            m_Doc.SendTo= m_Doc.Email_KAMP_YONETICI
+            m_Doc.sendCc = m_Doc.Email_CRM_MUDUR
+            
+            m_Doc.sonYetkili= ""
+            m_Doc.sonYetkiliOnay = "BB"
+            
+            'mail \\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\            
+            ' Added by Shalini on 20-Jan for TLP-2011-6712 to add kampanyaTuru at the beginning of the subject incase of "frmKampAks" form
+            If m_Doc.Form(0)="frmKampAks" Then
+                  strKonu = KampTuru + m_Doc.talepNo(0)  + " iþlem no.lu "+m_Doc.kampanyaAd(0)+ " adlý kampanya ile ilgili " + m_Doc.aksiyonAd(0) + " isimli aksiyon için CRM Bölüm Baþkaný uygunluk onayý verilmiþtir"
+            Else
+                  strKonu = KampTuru + m_Doc.talepNo(0)  + " iþlem no.lu "+m_Doc.kampanyaAd(0)+ " adlý kampanya ile ilgili " + m_Doc.aksiyonAd(0) + " isimli aksiyon için CRM Bölüm Baþkaný uygunluk onayý verilmiþtir"
+            End If
+            'Till Here  
+            
+            strIcerik = m_Doc.talepNo(0) + " iþlem no.lu "+m_Doc.kampanyaAd(0)+ " adlý kampanyaya ait " + Cstr(m_Doc.baslangicTarihi(0))+" tarihinde iþleme alýnmasý gereken " + m_Doc.aksiyonAd(0) + " isimli aksiyon için CRM Bölüm Baþkaný uygunluk onayý verilmiþtir. <br />"
+            strIcerik = strIcerik+ "Ýlgili aksiyona eriþim için " 
+            strIcerik= strIcerik+ {<a href="http://}+server.Common+".akbank.com.tr/"+m_Doc.DBPath(0)+"/0/"+m_Doc.UniversalID+{?OpenDocument">} & "týklayýnýz." & {</a><br />} 
+            strIcerik = strIcerik+ "Bilgi ve deðerlendirmelerinize sunulur.<br />"       
+            'mail /////////////////////////////////////////////////////////////////
+            
+            Call m_Doc.computeWithForm(True,False)
+            Call setDelegation("W", findYetkili())
+            
+            m_Doc.sendCc = Arrayappend(m_Doc.GetItemValue("sendCc"), getEmails(m_Doc.GetItemValue("DelegeAuthors")))
+            Call MailGonder(m_Doc.curUserMail(0), m_Doc.SendTo, m_Doc.sendCc, strKonu,  strIcerik)
+            m_Doc.sendCc = ""
+            
+            Call tarihceyeEkle(logtext, m_Doc)
+            
+            ' Yeni loglama mekanizmasý
+            strAction = "CRM Bölüm Baþkaný uygunluk onayý verildi"
+            Call TarihceOlustur(m_Doc, m_Doc.Form(0), m_Doc.Form(0), m_Doc.talepNo(0), m_Doc.FormNo(0), strAction, strAciklama)
+            
+            Call altDokGuncelle(m_Doc.dk(0), logtext)
+exitsub:
+            Exit Sub    
+ErrorHandler:
+            m_Doc.Action = "0"
+            m_Doc.Busy = "0"  
+            Call appLog.logError("LS:LsUygulamaAkis" , "UygulamaAkis - CRMBBOnay", Err, Erl, Error$, PRIORITY_TYPE_YUKSEK, COPYTOGENERALLOGDB_HAYIR, COPYTOBO_HAYIR )
+            Exit Sub 
+      End Sub
+      
+%REM
+********
+Sub OnaylaCrmYon()
+********
+%END REM
+      Sub OnaylaCrmYon()
+            On Error Goto ErrorHandler
+            Dim kisi
+            
+            logtext = Cstr(Now()) & " ~ Data Sorumlusuna gönderildi ~ " & m_username
+            Call tarihceyeEkle(logtext, m_Doc)
+            
+            ' Yeni loglama mekanizmasý
+            strAction = "Data Sorumlusuna gönderildi"
+            Call TarihceOlustur(m_Doc, m_Doc.Form(0), m_Doc.Form(0), m_Doc.talepNo(0), m_Doc.FormNo(0), strAction, strAciklama)
+            
+            m_Doc.dk= m_Doc.DK_DataSorda(0)
+            ' Burada mail gonderilecek kiþi sadece seçili sorumlu olmalý
+            ' m_Doc.Email_DATA_SORUMLU = setYetkiliMail("DATA_SORUMLU")
+            Set kisi = New Calisan(Strleft(m_Doc.DataSorumlusu(0), "-"))
+            m_Doc.Email_DATA_SORUMLU = kisi.EMAIL
+            m_Doc.SendTo= m_Doc.Email_DATA_SORUMLU               
+            
+            'mail \\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\            
+            m_Doc.sendCc = ""
+            
+            ' Added by Shalini on 20-Jan for TLP-2011-6712 to add kampanyaTuru at the beginning of the subject incase of "frmKampAks" form
+            If m_Doc.Form(0)="frmKampAks" Then
+                  strKonu = KampTuru + m_Doc.talepNo(0)  + " iþlem no.lu "+m_Doc.kampanyaAd(0)+ " adlý kampanya ile ilgili " + m_Doc.aksiyonAd(0) + " isimli aksiyon onaylanmýþtýr"
+            Else
+                  strKonu = KampTuru + m_Doc.talepNo(0)  + " iþlem no.lu "+m_Doc.kampanyaAd(0)+ " adlý kampanya ile ilgili " + m_Doc.aksiyonAd(0) + " isimli aksiyon onaylanmýþtýr"
+            End If
+            'Till Here  
+            
+            strIcerik = m_Doc.talepNo(0) + " iþlem no.lu "+m_Doc.kampanyaAd(0)+ " adlý kampanyaya ait " + Cstr(m_Doc.baslangicTarihi(0))+" tarihinde iþleme alýnmasý gereken " + m_Doc.aksiyonAd(0) + " isimli aksiyon "+m_Doc.curUserCN(0)+" tarafýndan onaylanmýþtýr. <br />"
+            strIcerik = strIcerik+ "Ýlgili aksiyona eriþim için " 
+            strIcerik= strIcerik+ {<a href="http://}+server.Common+".akbank.com.tr/"+m_Doc.DBPath(0)+"/0/"+m_Doc.UniversalID+{?OpenDocument">} & "týklayýnýz." & {</a><br />} 
+            strIcerik = strIcerik+ "Bilgi ve deðerlendirmelerinize sunulur.<br />"       
+            'mail /////////////////////////////////////////////////////////////////
+            
+            Call m_Doc.computeWithForm(True,False)
+            Call setDelegation("W", findYetkili())
+            
+            m_Doc.sendCc = getEmails(m_Doc.GetItemValue("DelegeAuthors"))
+            Call MailGonder(m_Doc.curUserMail(0), m_Doc.SendTo, m_Doc.sendCc, strKonu,  strIcerik)
+            m_Doc.sendCc = ""
+            
+            Call altDokGuncelle(m_Doc.dk(0), logtext)
+exitsub:
+            Exit Sub    
+ErrorHandler:
+            m_Doc.Action = "0"
+            m_Doc.Busy = "0"  
+            Call appLog.logError("LS:LsUygulamaAkis" , "UygulamaAkis - OnaylaCrmYon", Err, Erl, Error$, PRIORITY_TYPE_YUKSEK, COPYTOGENERALLOGDB_HAYIR, COPYTOBO_HAYIR )
+            Exit Sub 
+      End Sub
+      
+      %REM
+********
+Sub OnaylaBirebirSY()
+********
+      %END REM
+      Sub OnaylaBirebirSY(isDirekOnay As Boolean)
+            On Error GoTo ErrorHandler
+            Dim sFormula As String
+            Dim eval As Variant
+            Dim blResult As Boolean
+            Dim ccSY As Variant
+            Dim varSYBilgi As Variant
+            
+            m_Doc.dk= m_Doc.DK_KampYonOnay(0)        
+            Call createCMDScript()
+            logtext = CStr(Now()) & " ~ Kampanya Yöneticisi onayýna gönderildi ~ " & m_username
+            m_Doc.Email_KAMP_YONETICI = setYetkiliMail("KAMP_YONETICI")
+            m_Doc.SendTo= m_Doc.Email_KAMP_YONETICI
+            If isDirekOnay Then
+                  m_Doc.BireBirSYDec = "1"
+            Else
+                  m_Doc.BireBirSYDec = "0"
+            End If
+            m_Doc.BireBirSYDate = Now
+            
+            Call tarihceyeEkle(logtext, m_Doc)
+            
+            ' Yeni loglama mekanizmasý
+            strAction = "Kampanya Yöneticisi onayýna gönderildi"
+            Call TarihceOlustur(m_Doc, m_Doc.Form(0), m_Doc.Form(0), m_Doc.talepNo(0), m_Doc.FormNo(0), strAction, strAciklama)
+            
+            'mail \\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\            
+            m_Doc.sendCc = ""
+            If isDirekOnay Then
+                  strKonu = KampTuru + m_Doc.talepNo(0)  + " iþlem no.lu "+m_Doc.kampanyaAd(0)+ " adlý kampanya ile ilgili " + m_Doc.aksiyonAd(0) + " isimli aksiyon talep giriþi yapýlmýþtýr"
+                  
+                  strIcerik = m_Doc.talepNo(0) + " iþlem no.lu "+m_Doc.kampanyaAd(0)+ " adlý kampanyaya ait " + CStr(m_Doc.baslangicTarihi(0))+" tarihinde iþleme alýnmasý gereken " + m_Doc.aksiyonAd(0) + " isimli aksiyonun birebir segment seçimi uygun bulunarak onayýnýza gönderilmiþtir. "
+                  strIcerik = strIcerik+ "Talep Sahibi "+ m_Doc.GirisYapan(0) + ". <br />"
+                  strIcerik = strIcerik+ "Ýlgili aksiyona eriþim için " 
+                  strIcerik = strIcerik+ {<a href="http://}+server.Common+".akbank.com.tr/"+m_Doc.DBPath(0)+"/0/"+m_Doc.UniversalID+{?OpenDocument">} & "týklayýnýz." & {</a><br />} 
+                  strIcerik = strIcerik+ "Bilgi ve deðerlendirmelerinize sunulur.<br />"
+            Else
+                  ' Talep Sahibine gönderilecek mail
+                  strKonu = KampTuru + m_Doc.talepNo(0)  + " iþlem no.lu "+m_Doc.kampanyaAd(0)+ " adlý kampanya ile ilgili " + m_Doc.aksiyonAd(0) + " isimli aksiyon talebiniz birebir segment çýkarýlarak iletilmiþtir."
+                  
+                  strIcerik = m_Doc.talepNo(0) + " iþlem no.lu "+m_Doc.kampanyaAd(0)+ " adlý kampanyaya ait " + CStr(m_Doc.baslangicTarihi(0))+" tarihinde iþleme alýnmasý gereken " + m_Doc.aksiyonAd(0) + " isimli aksiyonun birebir segment seçimi uygun bulunmamýþtýr. Birebir segment seçimi kaldýrýlarak kampanya yönetimine talep ulaþmýþtýr. <br />"
+                  strIcerik = strIcerik+ "Ýlgili aksiyona eriþim için " 
+                  strIcerik = strIcerik+ {<a href="http://}+server.Common+".akbank.com.tr/"+m_Doc.DBPath(0)+"/0/"+m_Doc.UniversalID+{?OpenDocument">} & "týklayýnýz." & {</a><br />} 
+                  strIcerik = strIcerik+ "Bilgi ve deðerlendirmelerinize sunulur.<br />"
+                  Call MailGonder(m_Doc.curUserMail(0), m_Doc.girisyapanmail, m_Doc.sendCc, strKonu,  strIcerik)
+                  
+                  ' Kampanya Yöneticisine gönderilecek mail
+                  strKonu = KampTuru + m_Doc.talepNo(0)  + " iþlem no.lu "+m_Doc.kampanyaAd(0)+ " adlý kampanya ile ilgili " + m_Doc.aksiyonAd(0) + " isimli aksiyon talep giriþi yapýlmýþtýr"
+                  
+                  strIcerik = m_Doc.talepNo(0) + " iþlem no.lu "+m_Doc.kampanyaAd(0)+ " adlý kampanyaya ait " + CStr(m_Doc.baslangicTarihi(0))+" tarihinde iþleme alýnmasý gereken " + m_Doc.aksiyonAd(0) + " isimli aksiyonun birebir segment seçimi uygun bulunmamýþtýr. Birebir segment seçimi kaldýrýlarak talep tarafýnýza gönderilmiþtir. "
+                  strIcerik = strIcerik+ "Talep Sahibi "+ m_Doc.GirisYapan(0) + ". <br />"
+                  strIcerik = strIcerik+ "Ýlgili aksiyona eriþim için " 
+                  strIcerik = strIcerik+ {<a href="http://}+server.Common+".akbank.com.tr/"+m_Doc.DBPath(0)+"/0/"+m_Doc.UniversalID+{?OpenDocument">} & "týklayýnýz." & {</a><br />} 
+                  strIcerik = strIcerik+ "Bilgi ve deðerlendirmelerinize sunulur.<br />"             
+            End If
+            'mail /////////////////////////////////////////////////////////////////
+            
+            Call m_Doc.computeWithForm(True,False)
+            Call setDelegation("W", findYetkili())
+            
+            'cc'ye gidecekler belirleniyor \\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\            
+            m_Doc.sendCc = ""
+            m_Doc.SYBilgi = ""
+            ccSY = m_Doc.Getitemvalue("sendCc")
+            varSYBilgi = m_Doc.getItemValue("SYBilgi")
+            sFormula = {@IsMember("5"; segmentKodu) & !(@IsMember(kotaTipi; "Bireysel":"ADK":"Kobi":"Diðer")) & isGirisYapanBirebirSY != "1"}
+            eval = Evaluate(sFormula, m_Doc)
+            blResult = eval(0)
+            If blResult Then
+                  ccSY = ArrayAppend(ccSY, setYetkiliMail("BIREBIR_SY"))
+                  varSYBilgi = ArrayAppend(varSYBilgi, "BIREBIR")
+            End If
+            sFormula = {@IsMember("6"; segmentKodu) | @IsMember("13"; segmentKodu)}
+            eval = Evaluate(sFormula, m_Doc)
+            blResult = eval(0)
+            If blResult Then
+                  ccSY = ArrayAppend(ccSY, setYetkiliMail("BIREYSEL_SY"))
+                  varSYBilgi = ArrayAppend(varSYBilgi, "BIREYSEL")
+            End If
+            sFormula = {@IsMember("3"; segmentKodu) | @IsMember("7"; segmentKodu)}
+            eval = Evaluate(sFormula, m_Doc)
+            blResult = eval(0)
+            If blResult Then
+                  ccSY = ArrayAppend(ccSY, setYetkiliMail("MIKRO_SIRKET_SY"))
+                  varSYBilgi = ArrayAppend(varSYBilgi, "MIKRO_SIRKET")
+            End If
+            m_Doc.SYBilgi = varSYBilgi
+            m_Doc.SYBilgi = Evaluate({@Trim(SYBilgi)}, m_Doc)
+            If m_Doc.SYBilgi(0) <> "" Then
+                  m_Doc.SYBilgiDate = Now
+            End If
+            'cc'ye gidecekler belirleniyor /////////////////////////////////////////////////////////////////            
+            m_Doc.sendCc = ArrayUnique(ArrayAppend(ccSY, getEmails(m_Doc.GetItemValue("DelegeAuthors"))))
+            Call MailGonder(m_Doc.curUserMail(0), m_Doc.SendTo, m_Doc.sendCc, strKonu,  strIcerik)
+            m_Doc.sendCc = ""
+            
+            Call altDokGuncelle(m_Doc.dk(0), logtext)
+exitsub:
+            Exit Sub    
+ErrorHandler:
+            m_Doc.Action = "0"
+            m_Doc.Busy = "0"  
+            Call appLog.logError("LS:LsUygulamaAkis" , "UygulamaAkis - OnaylaIsbYon", Err, Erl, Error$, PRIORITY_TYPE_YUKSEK, COPYTOGENERALLOGDB_HAYIR, COPYTOBO_HAYIR )
+            Exit Sub 
+      End Sub
+      
+%REM
+********
+Sub BirebirSYRed()
+********
+%END REM
+      Sub BirebirSYRed()
+            On Error GoTo ErrorHandler
+            Dim strFormula As String
+            
+            strFormula = {@Trim(@Replace(segmentKodu; "5"; ""))}
+            m_Doc.segmentKodu = Evaluate(strFormula, m_Doc)
+            If m_Doc.segmentKodu(0) = "" Then
+                  Call iadeEt("BirebirSYRed", "AltDokumanGuncelle")
+            Else
+                  Call OnaylaBirebirSY(False)
+            End If
+            
+exitsub:
+            Exit Sub    
+ErrorHandler:
+            m_Doc.Action = "0"
+            m_Doc.Busy = "0"  
+            Call appLog.logError("LS:LsUygulamaAkis" , "UygulamaAkis - OnaylaIsbYon", Err, Erl, Error$, PRIORITY_TYPE_YUKSEK, COPYTOGENERALLOGDB_HAYIR, COPYTOBO_HAYIR )
+            Exit Sub 
+      End Sub
+
+%REM
+********
+Sub DataHazirlandi()
+********
+%END REM
+      Sub DataHazirlandi()
+            On Error Goto ErrorHandler 
+            logtext = Cstr(Now()) & " ~ Data hazýrlandý. Veri Madenciliði Yöneticisine gönderildi ~ " & m_username
+            Call tarihceyeEkle(logtext, m_Doc)
+            
+            ' Yeni loglama mekanizmasý
+            strAction = "Data hazýrlandý. Veri Madenciliði Yöneticisine gönderildi"
+            Call TarihceOlustur(m_Doc, m_Doc.Form(0), m_Doc.Form(0), m_Doc.talepNo(0), m_Doc.FormNo(0), strAction, strAciklama)
+            
+            m_Doc.dk= m_Doc.DK_CrmYonDataOnay(0)
+            ' Burada mail gonderilecek kiþi sadece seçili sorumlu olmalý
+            ' m_Doc.Email_CRM_SORUMLU = setYetkiliMail("CRM_YONETICI")
+            m_Doc.SendTo= m_Doc.Email_CRM_SORUMLU                
+            
+            'mail \\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\            
+            m_Doc.sendCc = ""
+            
+            ' Added by Shalini on 20-Jan for TLP-2011-6712 to add kampanyaTuru at the beginning of the subject incase of "frmKampAks" form
+            If m_Doc.Form(0)="frmKampAks" Then
+                  strKonu = KampTuru + m_Doc.talepNo(0)  + " iþlem no.lu "+m_Doc.kampanyaAd(0)+ " adlý kampanya ile ilgili " + m_Doc.aksiyonAd(0) + " isimli aksiyona ait data hazýrlanmýþtýr"
+            Else
+                  strKonu = KampTuru + m_Doc.talepNo(0)  + " iþlem no.lu "+m_Doc.kampanyaAd(0)+ " adlý kampanya ile ilgili " + m_Doc.aksiyonAd(0) + " isimli aksiyona ait data hazýrlanmýþtýr"
+            End If
+            'Till Here  
+            
+            strIcerik = m_Doc.talepNo(0) + " iþlem no.lu "+m_Doc.kampanyaAd(0)+ " adlý kampanyaya ait " + Cstr(m_Doc.baslangicTarihi(0))+" tarihinde iþleme alýnmasý gereken " + m_Doc.aksiyonAd(0) + " isimli aksiyon için "+m_Doc.curUserCN(0)+" tarafýndan data hazýrlanmýþtýr. <br />"
+            strIcerik = strIcerik+ "Ýlgili aksiyona eriþim için " 
+            strIcerik= strIcerik+ {<a href="http://}+server.Common+".akbank.com.tr/"+m_Doc.DBPath(0)+"/0/"+m_Doc.UniversalID+{?OpenDocument">} & "týklayýnýz." & {</a><br />} 
+            strIcerik = strIcerik+ "Bilgi ve deðerlendirmelerinize sunulur.<br />"       
+            'mail /////////////////////////////////////////////////////////////////
+            
+            Call m_Doc.computeWithForm(True,False)
+            Call setDelegation("W", findYetkili())
+            
+            m_Doc.sendCc = getEmails(m_Doc.GetItemValue("DelegeAuthors"))
+            Call MailGonder(m_Doc.curUserMail(0), m_Doc.SendTo, m_Doc.sendCc, strKonu,  strIcerik)
+            m_Doc.sendCc = ""
+            
+            Call altDokGuncelle(m_Doc.dk(0), logtext)
+exitsub:
+            Exit Sub    
+ErrorHandler:
+            m_Doc.Action = "0"
+            m_Doc.Busy = "0"  
+            Call appLog.logError("LS:LsUygulamaAkis" , "UygulamaAkis - DataHazirlandi", Err, Erl, Error$, PRIORITY_TYPE_YUKSEK, COPYTOGENERALLOGDB_HAYIR, COPYTOBO_HAYIR )
+            Exit Sub 
+      End Sub
+      
+%REM
+********
+Sub DataOnaylaCrmYon()
+********
+%END REM
+      Sub DataOnaylaCrmYon()
+            On Error Goto ErrorHandler
+            Dim kisi
+            
+            logtext = Cstr(Now()) & " ~ Data kontrol edildi. Kampanya Sorumlusuna gönderildi ~ " & m_username
+            Call tarihceyeEkle(logtext, m_Doc)
+            
+            ' Yeni loglama mekanizmasý
+            strAction = "Data kontrol edildi. Kampanya Sorumlusuna gönderildi"
+            Call TarihceOlustur(m_Doc, m_Doc.Form(0), m_Doc.Form(0), m_Doc.talepNo(0), m_Doc.FormNo(0), strAction, strAciklama)
+            
+            m_Doc.dk= m_Doc.DK_KamSorda(0)
+            ' Burada mail gonderilecek kiþi sadece seçili sorumlu olmalý
+            ' m_Doc.Email_KAMP_SORUMLU = setYetkiliMail("KAMP_SORUMLU")
+            Set kisi = New Calisan(Strleft(m_Doc.KampSorumlusu(0), "-"))
+            m_Doc.Email_KAMP_SORUMLU = kisi.EMAIL
+            m_Doc.SendTo= m_Doc.Email_KAMP_SORUMLU
+            
+            'mail \\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\\            
+            m_Doc.sendCc = ""
+            
+            ' Added by Shalini on 20-Jan for TLP-2011-6712 to add kampanyaTuru at the beginning of the subject incase of "frmKampAks" form
+            If m_Doc.Form(0)="frmKampAks" Then
+                  strKonu = KampTuru + m_Doc.talepNo(0)  + " iþlem no.lu "+m_Doc.kampanyaAd(0)+ " adlý kampanya ile ilgili " + m_Doc.aksiyonAd(0) + " isimli aksiyona ait data kontrol edilmiþtir"
+            Else
+                  strKonu = KampTuru + m_Doc.talepNo(0)  + " iþlem no.lu "+m_Doc.kampanyaAd(0)+ " adlý kampanya ile ilgili " + m_Doc.aksiyonAd(0) + " isimli aksiyona ait data kontrol edilmiþtir"
+            End If
+            'Till Here  
+            
+            strIcerik = m_Doc.talepNo(0) + " iþlem no.lu "+m_Doc.kampanyaAd(0)+ " adlý kampanyaya ait " + Cstr(m_Doc.baslangicTarihi(0))+" tarihinde iþleme alýnmasý gereken " + m_Doc.aksiyonAd(0) + " isimli aksiyon için "+m_Doc.curUserCN(0)+" tarafýndan data kontrol edilmiþtir. <br />"
+            strIcerik = strIcerik+ "Ýlgili aksiyona eriþim için " 
+            strIcerik= strIcerik+ {<a href="http://}+server.Common+".akbank.com.tr/"+m_Doc.DBPath(0)+"/0/"+m_Doc.UniversalID+{?OpenDocument">} & "týklayýnýz." & {</a><br />} 
+            strIcerik = strIcerik+ "Bilgi ve deðerlendirmelerinize sunulur.<br />"       
+            Call MailGonder(m_Doc.curUserMail(0), m_Doc.SendTo, m_Doc.sendCc, strKonu,  strIcerik)
+            'mail /////////////////////////////////////////////////////////////////
+            
+            Call m_Doc.computeWithForm(True,False)
+            Call setDelegation("W", findYetkili())
+            
+            m_Doc.sendCc = getEmails(m_Doc.GetItemValue("DelegeAuthors"))
+            Call MailGonder(m_Doc.curUserMail(0), m_Doc.SendTo, m_Doc.sendCc, strKonu,  strIcerik)
+            m_Doc.sendCc = ""
+            
+            Call altDokGuncelle(m_Doc.dk(0), logtext)
+exitsub:
+            Exit Sub    
+ErrorHandler:
+            m_Doc.Action = "0"
+            m_Doc.Busy = "0"  
+            Call appLog.logError("LS:LsUygulamaAkis" , "UygulamaAkis - DataOnaylaCrmYon", Err, Erl, Error$, PRIORITY_TYPE_YUKSEK, COPYTOGENERALLOGDB_HAYIR, COPYTOBO_HAYIR )
+            Exit Sub 
+      End Sub
+      
+%REM
+********
+Sub altDokGuncelle(dk As Integer, logtext)
+********
+%END REM
+      Sub altDokGuncelle(dk As Integer, logtext As String)
+            On Error Goto ErrorHandler
+            
+            ' Call appLog.logWarningSimple("lsUygulamaAkis", "altDokGuncelle", m_doc.FormNo(0))
+            Dim rsp_UygulamaAkis As UygulamaAkis
+            Dim docsRsp As NotesDocumentcollection
+            Dim docRsp As NotesDocument
+            Dim intRspSay As Integer 
+            
+            Set docsRsp = m_Doc.Responses
+            If docsRsp.count = 0 Then
+                  Exit Sub
+            End If
+            Set docRsp = docsRsp.getfirstdocument
+            Dim itemYazma As notesitem
+            Dim itemDelege As NotesItem
+            For intRspSay = 1 To docsRsp.count
+                  If docRsp.Form(0) = "EkDosyaForm" Then
+                        docRsp.dk = dk
+                        ' Brief'e ait ek dosyalarda
+                        If m_Doc.Form(0) = "frmAksBrief" Then
+                              ' Görsel dokümanlarýnda (ek dosyalarýnda)
+                              If docRsp.HasItem("DocType")Then
+                                   If docRsp.DocType(0) = "gorselDoc" Then
+                                         ' KIB'in onayý veya iadesi durumunda 
+                                         If m_Doc.DK(0) = m_Doc.DK_Isbirimi(0) Then  'KIB Onayý
+                                               ' KIB Selection bilgisi yoksa, KIB reject etti olarak iþaretlenmeli.
+                                               If Not docRsp.Hasitem("KIBSelection") Then docRsp.KIBSelection = "0"
+                                         ElseIf (m_Doc.DK(0) = m_Doc.DK_BriefSorda(0) And strAction = "Ýade edildi") Then 'KIB Iade
+                                               ' KIB Selection bilgisi yoksa, KIB reject etti olarak iþaretlenmeli.
+                                               If Not docRsp.Hasitem("KIBSelection") Then docRsp.KIBSelection = "0"
+                                               ' Tüm görsel dokümanlar arþivlendi olarak iþaretlenmeli
+                                               docRsp.Archived = "1"
+                                         ElseIf m_Doc.DK(0) = m_Doc.DK_HTMLBriefSor(0) Or (m_Doc.DK(0) = m_Doc.DK_KIB(0) And strAction = "Ýade edildi") Then ' Ýþ Birimi'nin onayý veya iadesi durumunda
+                                               ' ISB Selection bilgisi yoksa ve isbirimi görüyorsa (KIB rejected deðilse) ISB reject etti olarak iþaretlenmeli.
+                                               If Not docRsp.Hasitem("isbSelection") Then
+                                                     If Not docRsp.Hasitem("KIBSelection") Then
+                                                           docRsp.isbSelection = "0"
+                                                     ElseIf docRsp.KIBSelection(0) <> "0" Then
+                                                           docRsp.isbSelection = "0"
+                                                     End If
+                                               End If
+                                         End If
+                                   End If
+                              End If
+                        End If
+                        Call docRsp.save(True, False)
+                  ElseIf docRsp.Form(0) = "frmAksBrief" Then
+                        Dim blSaveBrief As Boolean
+                        If (m_Doc.dk(0) = m_Doc.DK_Iade(0) Or m_Doc.dk(0) = m_Doc.DK_Hazirlama(0)) And m_Doc.isKampSorIade(0) <> "1" Then
+                              docRsp.emailHTMLTip = m_Doc.emailHTMLTip
+                              If docRsp.dk(0) = docRsp.DK_Onayda(0) Then
+                                   docRsp.dk = docRsp.DK_Hazirlama
+                              End If
+                              blSaveBrief = True
+                        ElseIf docRsp.dk(0) = docRsp.DK_Hazirlama(0) Then
+                              docRsp.dk = docRsp.DK_Onayda
+                              blSaveBrief= True 
+                        End If
+                        If blSaveBrief Then
+                              Call docRsp.Computewithform(True, False)
+                              Call docRsp.save(True, False)
+                        End If
+                  ElseIf Cstr(docRsp.dk(0)) <> Cstr(docRsp.DK_Iptal(0)) Then
+                        docRsp.dk = dk
+                        Set itemYazma = m_Doc.getfirstitem("yazma")
+                        Call itemYazma.CopyItemToDocument( docRsp, "yazma" )
+                        Call docRsp.RemoveItem("DelegeAuthors")
+                        Set itemDelege = m_Doc.getfirstitem("DelegeAuthors")
+                        Call itemDelege.CopyItemToDocument( docRsp, "DelegeAuthors" )
+                        Call docRsp.RemoveItem("DelegeReaders")
+                        Set itemDelege = m_Doc.getfirstitem("DelegeReaders")
+                        Call itemDelege.CopyItemToDocument( docRsp, "DelegeReaders" )
+                        If m_Doc.Form(0) = "frmKampGir" Then
+                              docRsp.Yonlendirilen_uid = m_Doc.Yonlendirilen_uid
+                              docRsp.Yonlendirilen_cn = m_Doc.Yonlendirilen_cn
+                              docRsp.girisYapanYonSicil = m_Doc.girisYapanYonSicil
+                              
+                              If dk = 20 Or dk = 21 Then ' Yonetici onayý veya üst yönetici onayýnda güncelle
+                                   docRsp.isGirisYapanBirebirSY = m_Doc.isGirisYapanBirebirSY
+                              End If
+                              
+                              ' START - TLP-2011-3765 Özgür Kanca
+                              If m_Doc.HasItem("Yonetici") Then docRsp.Yonetici = m_Doc.Yonetici
+                              If m_Doc.HasItem("Email_YONETICI") Then docRsp.Email_YONETICI = m_Doc.Email_YONETICI
+                              ' END - TLP-2011-3765 Özgür Kanca
+                              If m_Doc.HasItem("UstOnay") Then docRsp.UstOnay = m_Doc.UstOnay
+
+                              Call tarihceyeEkle(logtext, docRsp)
+                              Call TarihceOlustur(docRsp, docRsp.Form(0), docRsp.Form(0), docRsp.talepNo(0), docRsp.FormNo(0), strAction, strAciklama)
+                        End If
+                        Call docRsp.computeWithForm(True,False)
+                        
+                        If docRsp.Form(0) = "frmKampAks" Or docRsp.Form(0) = "frmAksTeklif" Then
+                              If docRsp.dk(0) = docRsp.DK_YonOnay(0) Or docRsp.dk(0) = docRsp.DK_UstYonOnay(0) Then
+                                   ' Clear NewDoc delegations
+                                   docRsp.DelegeAuthors = ""
+                                   docRsp.DelegeReaders = ""
+                                   
+                                   ' Set NewDoc delegation
+                                   Dim delegeList As Variant
+                                   delegeList = getDelegations(docRsp.GetItemValue("yazma"))
+                                   docRsp.DelegeAuthors = delegeList
+                                   docRsp.DelegeReaders = delegeList
+                              ElseIf (doTeklifBackup) And docRsp.Form(0) = "frmAksTeklif" Then
+                                   docRsp.teklifAd_Org = docRsp.teklifAd
+                                   docRsp.teklifKitleTanimi_Org = docRsp.teklifKitleTanimi
+                                   docRsp.teklifAciklama_Org = docRsp.teklifAciklama_Text
+                                   docRsp.kampanyaUrunu_Org = docRsp.kampanyaUrunu
+                                   docRsp.kampanyaUrunu_Diger_Org = docRsp.kampanyaUrunu_Diger
+                                   docRsp.emailSubject_Org = docRsp.emailSubject
+                                   docRsp.smsMetni_Org = docRsp.smsMetni
+                                   docRsp.subeRol_Org = docRsp.subeRol
+                                   docRsp.subeScript_Org = docRsp.subeScript_Text
+                                   docRsp.cagriMerkezScript_Org = docRsp.cagriMerkezScript_Text
+                                   docRsp.digerScript_Org = docRsp.digerScript_Text
+                                   docRsp.isModified = "0"
+                              End If
+                        End If
+                        Call docRsp.save(True, False)
+                        
+                        If docRsp.Form(0) = "frmKampAks" Then
+                              Set rsp_UygulamaAkis =  New UygulamaAkis(docRsp, m_username, m_sicil)
+                              Call rsp_UygulamaAkis.altDokGuncelle(dk, logtext)
+                        End If
+                  End If
+                  Set docRsp = docsRsp.getnextdocument(docRsp)
+            Next  
+exitsub:
+            Exit Sub    
+ErrorHandler:
+            m_Doc.Action = "0"
+            m_Doc.Busy = "0"  
+            Call appLog.logError("LS:LsUygulamaAkis" , "UygulamaAkis - altDokGuncelle", Err, Erl, Error$, PRIORITY_TYPE_YUKSEK, COPYTOGENERALLOGDB_HAYIR, COPYTOBO_HAYIR )
+            Exit Sub 
+      End Sub
+      
+%REM
+********
+Sub tamamla()
+********
+%END REM
+      Sub tamamla()
+            On Error Goto ErrorHandler
+            
+            logtext = Cstr(Now()) & " ~ Tamamlandý ~ " & m_username                
+            Call tarihceyeEkle(logtext, m_Doc)
+            
+            ' Yeni loglama mekanizmasý
+            strAction = "Tamamlandý"
+            Call TarihceOlustur(m_Doc, m_Doc.Form(0), m_Doc.Form(0), m_Doc.talepNo(0), m_Doc.FormNo(0), strAction, strAciklama)
+            
+            m_Doc.dk = m_Doc.DK_Tamam(0)
+            If m_Doc.HasItem("gercekBitisTarihi") Then
+                  If CStr(m_Doc.gercekBitisTarihi(0)) <> "" Then
+                        If m_Doc.HasItem("bitisTarihi_org") Then
+                              m_Doc.bitisTarihi_org = Evaluate({@Trim(bitisTarihi_org:bitisTarihi)}, m_Doc)
+                        Else
+                              m_Doc.bitisTarihi_org = m_Doc.bitisTarihi
+                        End If
+                        m_Doc.bitisTarihi = m_Doc.gercekBitisTarihi(0)
+                  End If
+            End If
+            
+            Call m_Doc.computeWithForm(True,False)
+
+            Call altDokGuncelle(m_Doc.dk(0), logtext)      
+exitsub:
+            Exit Sub    
+ErrorHandler:
+            m_Doc.Action = "0"
+            m_Doc.Busy = "0"  
+            Call appLog.logError("LS:LsUygulamaAkis" , "UygulamaAkis - tamamla", Err, Erl, Error$, PRIORITY_TYPE_YUKSEK, COPYTOGENERALLOGDB_HAYIR, COPYTOBO_HAYIR )
+            Exit Sub 
+      End Sub
+      
+%REM
+      Sub TarihceOlustur
+      Description: It is required to create a new history response document for the main document on
+      every event click so that these History docunments can be shown in an embedded view of the
+      main document.
+%END REM
+      Sub TarihceOlustur(doc As NotesDocument,MainFrm As String,FrmType As String,DocNo As String,RespNo As String,Action As String,Aciklama As String)
+            On Error Goto ErrH
+            Dim Tarihce As NotesDocument
+            Dim db As NotesDatabase
+            Dim s As New NotesSession
+            Set db=s.currentdatabase
+            Set Tarihce=db.Createdocument()
+            
+            With Tarihce
+                  .Form="frmTarihceLogs"
+                  .mainFormType=MainFrm
+                  .formType=FrmType
+                  .talepNo=DocNo
+                  .parentdocNo=RespNo
+                  .actionDate=Now()
+                  .action=Action
+                  .userId=m_sicil
+                  .userName=m_username
+                  .detail=Aciklama
+                  .parentUNID = doc.Universalid
+            End With
+            Call Tarihce.Computewithform(True, False)
+            Call Tarihce.save(True,False)
+            doc.HistoryFlag = "1"
+            Exit Sub
+ErrH:
+            Call appLog.logError("LS:LsUygulamaAkis" , "UygulamaAkis - TarihceOlustur", Err, Erl, Error$, PRIORITY_TYPE_YUKSEK, COPYTOGENERALLOGDB_HAYIR, COPYTOBO_HAYIR )
+            Exit Sub
+      End Sub
+      
+      
+%REM
+            ********
+            Sub DongTamam
+            Description: Created by Shalini for TLP-2012-537 on 13-Mar-2012.
+            ********
+%END REM
+      Sub DongTamam()
+            On Error Goto ErrH
+            
+            'Setting new action number
+            Dim varNo As Variant
+            Dim tmpNo As Integer
+            Dim maxNo As Integer
+            Dim NewFormNo As String
+            Dim NewDoc As NotesDocument
+            Dim db As NotesDatabase
+            Dim s As New NotesSession
+            
+            varNo = Evaluate({@IfError(@Trim(@DBLookup("":"NoCache"; @DBName; "vwLkpKampAks"; "} + m_Doc.Parentdocumentunid + {"; "FormNo")); "")} )
+            If varNo(0) = "" Then
+                  NewFormNo = m_Doc.TalepNo(0) + "-01"
+            Else
+                  maxNo = 0
+                  Forall no In varNo
+                        tmpNo = Cint(Strrightback(Cstr(no), "-"))
+                        If maxNo < tmpNo Then maxNo = tmpNo
+                  End Forall
+                  NewFormNo = m_Doc.TalepNo(0) + "-" + Right("0" + Cstr(Cint(maxNo) + 1), 2)
+            End If
+            'End of setting new action number
+            'Setting the new doc
+            Set db=s.currentdatabase
+            Set NewDoc=db.Createdocument()
+            Call m_doc.CopyAllItems( NewDoc, True )
+            NewDoc.FormNo=NewFormNo
+            NewDoc.DK=m_doc.DK_Hazirlama(0)
+            NewDoc.FlgDuplicate="1"
+                        
+            'if donguID is not present or empty in original document, then set the FormNO of original doc in this field
+            If Not m_Doc.Hasitem("donguID") Then
+                  NewDoc.donguID=m_Doc.FormNo(0)
+            Elseif m_Doc.donguID(0)="" Then
+                  NewDoc.donguID=m_Doc.FormNo(0)
+            End If
+            NewDoc.History=""
+            
+            logtext = Cstr(Now()) & " ~ Yeni döngü dokümaný oluþturuldu ~ " & m_username
+            
+            Call tarihceyeEkle(logtext, NewDoc)
+            
+            Call NewDoc.ComputeWithForm(False, False)
+            
+            ' Clear NewDoc delegations
+            NewDoc.DelegeAuthors = ""
+            NewDoc.DelegeReaders = ""
+            
+            ' Set NewDoc delegation
+            Dim delegeList As Variant
+            delegeList = getDelegations(NewDoc.GetItemValue("yazma"))
+            NewDoc.DelegeAuthors = delegeList
+            NewDoc.DelegeReaders = delegeList
+            
+            NewDoc.Busy="0"
+            NewDoc.IsKotaReserved=""
+            Call NewDoc.RemoveItem("gercekBitisTarihi")
+            Call NewDoc.RemoveItem("bitisTarihi_org")
+            
+            Call NewDoc.Save(True, False)
+            
+            strAction = "Yeni döngü dokümaný oluþturuldu"
+            strAciklama=""
+            
+            Call TarihceOlustur(NewDoc, NewDoc.Form(0), NewDoc.Form(0), NewDoc.talepNo(0), NewDoc.FormNo(0), strAction, strAciklama)
+            
+            'Sending mail for new aksiyon document
+            strKonu=m_Doc.talepNo(0)+" - "+m_Doc.kampanyaAd(0) + " kampanyasýna ait aksiyon formu bir sonraki döngü bilgilerini doldurmanýz için tarafýnýza gönderilmiþtir"
+            strIcerik=m_Doc.talepNo(0) + " no.lu ve " + m_Doc.kampanyaAd(0)+ " isimli kampanyanýn " + NewFormNo + " no lu aksiyon formu bir sonraki döngü bilgilerini doldurmanýz için tarafýnýza gönderilmiþtir.<br />"+ "Aksiyon formuna "
+            strIcerik= strIcerik+ {<a href="http://}+server.Common+".akbank.com.tr/"+m_Doc.DBPath(0)+"/0/"+NewDoc.UniversalID+{?OpenDocument">} & "buradan " & {</a>}    
+            strIcerik= strIcerik+ " ulaþabilirsiniz."
+            
+            m_Doc.sendCc = getEmails(delegeList)
+            Call MailGonder(m_Doc.curUserMail(0), m_Doc.GirisYapanMail, m_Doc.sendCc, strKonu,  strIcerik)
+            m_Doc.sendCc = ""
+            
+            'setting m_doc (original document), to Tamam status
+            Call tamamla()
+            Exit Sub
+ErrH:
+            Call appLog.logError("LS:LsUygulamaAkis" , "UygulamaAkis - DongTamam", Err, Erl, Error$, PRIORITY_TYPE_YUKSEK, COPYTOGENERALLOGDB_HAYIR, COPYTOBO_HAYIR )
+            Exit Sub
+      End Sub     
+      
+%REM
+            ********
+            Sub setDelegation(RW As String, doc As NotesDocument)
+            Description: Created by Ozgur Kanca for TLP-2012-2135 on 07.05.2012.
+            ********
+%END REM
+      Function getDelegations(delegeEden As Variant) As Variant
+            On Error GoTo ErrorHandler
+            Dim oSession As New NotesSession
+            Dim oDelegeDB As NotesDatabase
+            Dim oDelegeView As NotesView
+            Dim oDelegeCollection As NotesDocumentCollection
+            Dim oDelegeDoc As NotesDocument
+            Dim outputstr As String, s1 As String, delege As String
+            Dim delegeList() As String
+            Dim idx As Integer
+            
+            Dim varDBFilePath As Variant
+            Dim keyvalue As String
+            Dim l As Integer
+            Const AppDelegationKeyword = "KYS"
+            
+            Const DesignElementName = "LS:LsUygulamaAkis"
+            Const ProcedureName = "getDelegations"
+            
+            ' Call appLog.logWarning(DesignElementName, ProcedureName, "Delegelerin aranmasý baþladý. DelegeEdenler : " + Implode(delegeEden), "D", "H", "H" )
+            
+            idx = -1
+            Redim delegeList(0) As String
+            delegeList(0) = ""
+            
+            varDBFilePath = Evaluate ( {@DbLookup ( "" : "NoCache"; @Subset ( @DbName; 1 ) : "lib\\dblist.nsf"; "vwApplicationLookup"; "AKBANK_DELEGASYON"; 3; [FailSilent] )} )
+            Set oDelegeDB = oSession.GetDatabase ( varDBFilePath ( 0 ), varDBFilePath ( 1 ), False )
+            If Not (oDelegeDB Is Nothing) Then
+                  Set oDelegeView = oDelegeDB.GetView("DELV09")
+                  
+                  
+                  ' Set delegation
+                  Forall inputstr In delegeEden
+                        ' Call appLog.logWarning(DesignElementName, ProcedureName, inputStr + "'in delegeleri aranýyor", "D", "H", "H" )
+                        outputstr = ""
+                        If Instr(inputstr,"/uid=") > 0 Then
+                              s1 = Right(inputstr,Len(inputstr)-Instr(inputstr,"/uid=")-4)
+                              outputstr = Left(s1,Instr(s1,"/")-1)
+                        Elseif Instr(inputstr,"(") > 0 And  Instr(inputstr,")") > 0 Then
+                              s1 = Right(inputstr,Len(inputstr)-Instr(inputstr,"("))
+                              outputstr = Left(s1,Len(s1)-1)
+                        Else
+                              outputstr = inputstr
+                        End If
+                        If outputstr <> "" Then
+                              keyvalue = outputstr + "-" + AppDelegationKeyword
+                              Set oDelegeCollection = oDelegeView.GetAlldocumentsbykey(keyvalue, True)
+                              
+                              For l=1 To oDelegeCollection.Count
+                                   Set oDelegeDoc = oDelegeCollection.GetNthDocument(l)
+                                   idx = idx + 1
+                                   Redim Preserve delegeList(idx) As String
+                                   delegeList(idx) = oDelegeDoc.delegesicil(0)
+                                   ' Call appLog.logWarning(DesignElementName, ProcedureName, inputStr + "'in delegesi " + delegeList(idx) + " eklendi", "D", "H", "H" )
+                              Next
+                        End If
+                  End Forall
+            End If
+            getDelegations = Arrayunique(delegeList)
+            ' Call appLog.logWarning(DesignElementName, ProcedureName, "Delegelerin aranmasý bitti. Tüm delegeler : " + Implode(Arrayunique(delegeList)), "D", "H", "H" )
+Terminate:
+            Exit Function
+ErrorHandler:
+            Call appLog.logError("LS:LsUygulamaAkis" , "UygulamaAkis - getDelegations", Err, Erl, Error$, PRIORITY_TYPE_YUKSEK, COPYTOGENERALLOGDB_HAYIR, COPYTOBO_HAYIR )
+            Resume Terminate
+      End Function
+      
+%REM
+            ********
+            Sub setDelegation(RW As String, doc As NotesDocument)
+            Description: Created by Ozgur Kanca for TLP-2012-2135 on 07.05.2012.
+            ********
+%END REM
+      Sub setDelegation(RW As String, delegeEden As Variant)
+            On Error Goto ErrorHandler
+            Dim delegeList As Variant
+            
+            ' Clear current delegation
+            m_Doc.DelegeAuthors = ""
+            m_Doc.DelegeReaders = ""
+            
+            ' Set delegation
+            delegeList = getDelegations(delegeEden)
+            If RW = "W" Then
+                  m_Doc.DelegeAuthors = delegeList
+            End If
+            m_Doc.DelegeReaders = delegeList
+exitsub:
+            Exit Sub
+ErrorHandler:
+            Call appLog.logError("LS:LsUygulamaAkis" , "UygulamaAkis - setDelegation", Err, Erl, Error$, PRIORITY_TYPE_YUKSEK, COPYTOGENERALLOGDB_HAYIR, COPYTOBO_HAYIR )
+            Resume exitsub
+      End Sub
+      
+%REM
+      dk=DK_KampYonOnay; "[KAMP_YONETICI]";
+      dk=DK_CrmYonOnay; "[CRM_YONETICI]";
+      dk=DK_KamSorda; "[KAMP_SORUMLU]";
+      dk=DK_DataSorda; "[DATA_SORUMLU]";
+      dk=DK_CrmYonDataOnay; "[CRM_YONETICI]";
+      dk=DK_KampYonSonOnay; "[KAMP_YONETICI]";
+      dk=DK_KampSorSonOnay; "[KAMP_SORUMLU]";
+%END REM
+      Function findYetkili() As Variant
+            On Error Goto ErrorHandler
+            Dim tmp() As String
+            Dim yetkiliList As Variant
+            
+            yetkiliList = ""
+            
+            If m_Doc.Form(0)="frmKampGir" Then
+                  yetkiliList = m_Doc.GetItemValue("yazma")
+            ElseIf m_Doc.Form(0)="frmAksBrief" Then
+                  Select Case m_Doc.DK(0)
+                  Case m_Doc.DK_BriefSorda(0), m_Doc.DK_Ajans(0),m_Doc.DK_HTMLBriefSor(0)
+                        ReDim tmp(0) As String
+                        tmp(0) = StrLeft(m_Doc.BriefSorumlusu(0), "-")
+                        yetkiliList = tmp
+                  Case Else
+                        yetkiliList = m_Doc.GetItemValue("yazma")
+                  End Select
+            Else
+                  Select Case m_Doc.DK(0)
+                  Case m_Doc.DK_KampYonOnay(0)
+                        Redim tmp(0) As String
+                        tmp(0) = ""
+                        yetkiliList = tmp
+                  Case m_Doc.DK_CrmYonOnay(0)
+                        Redim tmp(0) As String
+                        tmp(0) = Strleft(m_Doc.CRMYonetici(0), "-")
+                        yetkiliList = tmp
+                  Case m_Doc.DK_KamSorda(0)
+                        Redim tmp(0) As String
+                        tmp(0) = Strleft(m_Doc.KampSorumlusu(0), "-")
+                        yetkiliList = tmp
+                  Case m_Doc.DK_DataSorda(0)
+                        Redim tmp(0) As String
+                        tmp(0) = Strleft(m_Doc.DataSorumlusu(0), "-")
+                        yetkiliList = tmp
+                  Case m_Doc.DK_CrmYonDataOnay(0)
+                        Redim tmp(0) As String
+                        tmp(0) = Strleft(m_Doc.CRMYonetici(0), "-")
+                        yetkiliList = tmp
+                  Case m_Doc.DK_KampYonSonOnay(0)
+                        Redim tmp(0) As String
+                        tmp(0) = ""
+                        yetkiliList = tmp
+                  Case m_Doc.DK_CrmMudurOnay(0)
+                        Redim tmp(0) As String
+                        tmp(0) = Strleft(m_Doc.CRMMudur(0), "-")
+                        yetkiliList = tmp
+                  Case m_Doc.DK_CrmBBOnay(0)
+                        Redim tmp(0) As String
+                        tmp(0) = Strleft(m_Doc.CRMBB(0), "-")
+                        yetkiliList = tmp
+                  Case m_Doc.DK_KampSorSonOnay(0)
+                        Redim tmp(0) As String
+                        tmp(0) = Strleft(m_Doc.KampSorumlusu(0), "-")
+                        yetkiliList = tmp
+                  Case Else
+                        yetkiliList = m_Doc.GetItemValue("yazma")
+                  End Select
+            End If
+            findYetkili = yetkiliList
+Terminate:
+            Exit Function
+ErrorHandler:
+            Call appLog.logError("LS:LsUygulamaAkis" , "UygulamaAkis - findYetkili", Err, Erl, Error$, PRIORITY_TYPE_YUKSEK, COPYTOGENERALLOGDB_HAYIR, COPYTOBO_HAYIR )
+            Resume Terminate
+      End Function
+      
+      Function getEmails(sicilList As Variant) As Variant
+            On Error Goto ErrorHandler
+            Dim emailList() As String
+            Dim idx As Integer
+            Dim emp
+            
+            If Ubound(sicilList) = 0 And sicilList(0) = "" Then
+                  getEmails = sicilList
+            Else
+                  idx = -1
+                  Redim emailList(0) As String
+                  emailList(0) = ""
+                  
+                  Forall sicil In sicilList
+                        idx = idx + 1
+                        Redim Preserve emailList(idx) As String
+                        Set emp = New Calisan(Cstr(sicil))
+                        emailList(idx) = emp.EMAIL
+                  End Forall
+                  
+                  getEmails = emailList
+            End If
+Terminate:
+            Exit Function
+ErrorHandler:
+            Call appLog.logError("LS:LsUygulamaAkis" , "UygulamaAkis - getEmails", Err, Erl, Error$, PRIORITY_TYPE_YUKSEK, COPYTOGENERALLOGDB_HAYIR, COPYTOBO_HAYIR )
+            Resume Terminate
+      End Function
+End Class
